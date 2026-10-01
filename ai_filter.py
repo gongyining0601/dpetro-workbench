@@ -61,7 +61,7 @@ SYSTEM_PROMPT = (
     "4. 辽宁地区工业/能源相关新闻。"
     "relevant=false 的情形（仅限以下）：纯农业种养殖、文学副刊、公安政法、娱乐体育、"
     "社会民生（非能源）、教育医疗、消费财经（非工业）等与能源化工完全无关的内容。"
-    "angles 最多 3 个简短中文标签（如：春检、安全、人物、新材料、保供、党建），"
+    "angles 最多 3 个简短中文标签（如：春检、安全、人物、新材料、保供、党建、勘探、炼化、CCUS、设备、QC、提质增效），"
     "irrelevant 时为空数组。不要输出 JSON 以外的任何文字。"
 )
 
@@ -138,10 +138,28 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
     失败时根据连续失败次数决定放行或拒绝（见 _decide_on_failure）。
     """
     api_key = os.getenv("SILICONFLOW_API_KEY", "")
+
+    # 硬规则兜底：标题/正文命中石化行业关键词直接判相关，不依赖 LLM
+    _PETRO_KEYWORDS = (
+        "石油", "石化", "炼化", "炼油", "油田", "油井", "钻井", "井场", "采油",
+        "乙烯", "催化", "加氢", "重整", "常减压", "焦化", "烷基化", "芳烃",
+        "天然气", "煤层气", "LNG", "储气库", "保供", "调峰",
+        "中国石油", "中石化", "中海油", "中石油", "昆仑", "长庆", "塔里木",
+        "大庆", "胜利", "辽河", "锦州石化", "锦州石油",
+        "CCUS", "碳中和", "碳达峰", "氢能", "光伏", "风电", "新能源",
+        "新材料", "高端化工", "精细化工",
+        "春检", "秋检", "安全生产", "隐患", "设备", "工艺",
+    )
+    _check_text = f"{title} {summary} {body_text}"
+    for kw in _PETRO_KEYWORDS:
+        if kw in _check_text:
+            # 命中硬规则：返回相关，标签取命中的关键词
+            return (True, [kw] if kw not in ("中国石油", "中石化", "中海油", "中石油") else ["行业动态"])
+
     if not api_key:
         return _decide_on_failure()
 
-    body_excerpt = (body_text or "")[:800]
+    body_excerpt = (body_text or "")[:2000]
     user_prompt = f"标题：{title}\n摘要：{summary or '无'}\n正文：{body_excerpt}"
 
     try:
