@@ -148,7 +148,7 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
         "大庆", "胜利", "辽河", "锦州石化", "锦州石油",
         "CCUS", "碳中和", "碳达峰", "氢能", "光伏", "风电", "新能源",
         "新材料", "高端化工", "精细化工",
-        "春检", "秋检", "安全生产", "隐患", "设备", "工艺",
+        "春检", "秋检", "安全生产", "隐患",
     )
     _check_text = f"{title} {summary} {body_text}"
     for kw in _PETRO_KEYWORDS:
