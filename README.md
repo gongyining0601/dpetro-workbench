@@ -102,3 +102,5 @@ python -B crawler.py
 - 时间一律存 ISO 字符串
 - 演示数据开关 `DEMO_SEED_ON_EMPTY` 在 config.py（默认 False）
 - 常规选题种子在 config.py 的 ROUTINE_TOPICS_SEED（春检/安全月/七一/冬季保供/VOCs 治理等）
+
+<!-- redeploy trigger -->
