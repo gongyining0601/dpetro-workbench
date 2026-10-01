@@ -13,12 +13,34 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 
 import config
+
+# 连接池：Supabase 免费版连接上限约 60，maxconn 留余量
+_POOL_MAXCONN = 10
+_pool: ThreadedConnectionPool | None = None
+
+
+def _get_pool() -> ThreadedConnectionPool:
+    """懒初始化线程安全连接池。"""
+    global _pool
+    if _pool is None:
+        if not config.DB_DSN:
+            raise RuntimeError(
+                "DATABASE_URL 未设置。请在 .env / Streamlit Cloud secrets / GitHub "
+                "Actions secrets 里配置 Supabase connection string。"
+            )
+        _pool = ThreadedConnectionPool(
+            minconn=1,
+            maxconn=_POOL_MAXCONN,
+            dsn=config.DB_DSN,
+        )
+    return _pool
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS media_source (
@@ -110,18 +132,19 @@ CREATE INDEX IF NOT EXISTS idx_article_embedding ON article_embedding(article_id
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """返回 UTC 时间的 ISO 字符串，确保跨环境（本地/Streamlit/GitHub Actions）一致。"""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @contextmanager
 def get_conn():
-    """带上下文管理的连接；自动提交/回滚。返回 RealDictCursor（dict-like 行）。"""
-    if not config.DB_DSN:
-        raise RuntimeError(
-            "DATABASE_URL 未设置。请在 .env / Streamlit Cloud secrets / GitHub "
-            "Actions secrets 里配置 Supabase connection string。"
-        )
-    conn = psycopg2.connect(config.DB_DSN)
+    """从连接池获取连接；自动提交/回滚，用完归还池。返回 RealDictCursor（dict-like 行）。"""
+    pool = _get_pool()
+    conn = pool.getconn()
+    # 健康检查：连接断开则丢弃重建
+    if conn.closed:
+        pool.putconn(conn, close=True)
+        conn = pool.getconn()
     conn.autocommit = False
     try:
         yield conn
@@ -130,7 +153,7 @@ def get_conn():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 def _exec(c, sql, params=None):

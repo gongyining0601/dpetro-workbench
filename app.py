@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import streamlit as st
 
 import config
@@ -23,6 +25,22 @@ import topic_matcher
 import draft_checker
 
 st.set_page_config(page_title="锦州石化投稿辅助台", layout="wide")
+
+
+def _md_escape(s: str) -> str:
+    """转义 markdown 特殊字符，防止第三方内容（标题/URL）注入。"""
+    if not s:
+        return ""
+    return re.sub(r"([\\*_{}\[\]()#+.\!|>])", r"\\\1", str(s))
+
+
+def _safe_anchor(label: str, url: str) -> str:
+    """生成安全的 markdown 链接文本，仅允许 http/https 协议。"""
+    safe_url = (url or "").strip()
+    if not safe_url.startswith(("http://", "https://")):
+        return f"{_md_escape(label)}：{_md_escape(safe_url)}"
+    return f"[{_md_escape(label)}]({safe_url})"
+
 st.title("📰 锦州石化投稿辅助台")
 
 # 启动时初始化数据库
@@ -32,11 +50,22 @@ except Exception as e:
     st.error(f"DB 初始化失败：{e}")
     st.stop()
 
-# 向量索引同步（P3）：失败不阻塞启动，回退关键词检索
-try:
-    _chroma_stats = topic_matcher.ensure_index_synced()
-except Exception as e:
-    _chroma_stats = {"error": str(e), "fallback": True}
+# 向量索引同步：用 session_state 缓存，避免每次 rerun 都调 embedding API
+# 审核操作后会置 _force_vec_sync=True 强制同步；否则每 VEC_SYNC_INTERVAL 秒同步一次
+import time as _time
+_VEC_SYNC_INTERVAL = 60  # 秒
+_force = st.session_state.get("_force_vec_sync", False)
+_last = st.session_state.get("_vec_sync_time", 0)
+if _force or (_time.time() - _last) > _VEC_SYNC_INTERVAL:
+    try:
+        _chroma_stats = topic_matcher.ensure_index_synced()
+        st.session_state["_vec_sync_time"] = _time.time()
+        st.session_state["_force_vec_sync"] = False
+    except Exception as e:
+        _chroma_stats = {"error": str(e), "fallback": True}
+else:
+    _chroma_stats = st.session_state.get("_vec_sync_stats", {"fallback": False, "in_index": 0})
+st.session_state["_vec_sync_stats"] = _chroma_stats
 
 
 # ---------------- 侧边状态 ----------------
@@ -81,7 +110,7 @@ with tab_review:
         with st.container(border=True):
             cols = st.columns([5, 2, 2, 2])
             with cols[0]:
-                st.markdown(f"**{r['title']}**")
+                st.markdown(f"**{_md_escape(r['title'])}**")
                 st.caption(
                     f"{r['source_name']} · {r['column_name']} · "
                     f"{r['publish_date'] or '日期不详'} · 作者: {r['author'] or '不详'}"
@@ -92,20 +121,23 @@ with tab_review:
                         st.text_area("正文预览（前 500 字）",
                                      r["body_text"][:500], height=160,
                                      disabled=True, key=f"body_{r['id']}")
-                    st.markdown(f"原文链接：{r['url']}")
+                    st.markdown(_safe_anchor("原文链接", r['url']))
             with cols[1]:
                 if st.button("相关", key=f"rel_{r['id']}", type="primary"):
                     db.set_review(r["id"], "相关")
+                    st.session_state["_force_vec_sync"] = True
                     st.toast("已标「相关」", icon="✅")
                     st.rerun()
             with cols[2]:
                 if st.button("借鉴", key=f"bor_{r['id']}"):
                     db.set_review(r["id"], "借鉴")
+                    st.session_state["_force_vec_sync"] = True
                     st.toast("已标「借鉴」", icon="💡")
                     st.rerun()
             with cols[3]:
                 if st.button("无关", key=f"irr_{r['id']}"):
                     db.set_review(r["id"], "无关")
+                    st.session_state["_force_vec_sync"] = True
                     st.toast("已标「无关」", icon="🚫")
                     st.rerun()
 
@@ -120,10 +152,10 @@ with tab_history:
         for r in rows:
             tag = {"相关": "🟢", "借鉴": "🟡", "无关": "⚪"}.get(r["decision"], "❓")
             st.markdown(
-                f"{tag} **{r['title']}** "
-                f"`{r['source_name']}/{r['column_name']}` "
-                f"{r['publish_date'] or ''} "
-                f"_{r['reviewed_at']}_"
+                f"{tag} **{_md_escape(r['title'])}** "
+                f"`{_md_escape(r['source_name'])}/{_md_escape(r['column_name'])}` "
+                f"{_md_escape(str(r['publish_date'] or ''))} "
+                f"_{_md_escape(str(r['reviewed_at']))}_"
             )
 
 
@@ -189,12 +221,12 @@ with tab_match:
             st.markdown("### 相似已发稿")
             for m in matches:
                 st.markdown(
-                    f"- **{m['title']}** "
-                    f"`{m['source']}/{m['column']}` "
-                    f"_{m['publish_date'] or ''}_ "
+                    f"- **{_md_escape(m['title'])}** "
+                    f"`{_md_escape(m['source'])}/{_md_escape(m['column'])}` "
+                    f"_{_md_escape(str(m['publish_date'] or ''))}_ "
                     f"[相关度 {m['score']}]"
                 )
-                st.caption(f"  链接：{m['url']}（{m['decision']}）")
+                st.caption(_safe_anchor(f"链接（{m['decision']}）", m['url']))
         st.markdown("### 角度建议")
         for a in topic_matcher.angle_advice(kws):
             st.markdown(f"- {a}")

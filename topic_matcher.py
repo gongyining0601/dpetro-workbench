@@ -218,25 +218,35 @@ def _match_vector(keywords: list[str], top_k: int, store: NumpyVectorStore) -> l
 
 
 def _match_keywords(keywords: list[str], top_k: int) -> list[dict]:
-    """原 MVP 关键词字符串包含打分（兜底）。"""
+    """关键词字符串包含打分（兜底）。一条 JOIN 查出 body_text，避免 N+1 查询。"""
     kw_lower = [k.lower() for k in keywords]
-    rows = db.fetch_reviewed(limit=1000)
+    with db.get_conn() as c:
+        cur = db.conn_cursor(c)
+        cur.execute(
+            "SELECT a.id, a.title, a.url, a.publish_date, a.body_text, "
+            "r.decision, c.name AS column_name, s.name AS source_name "
+            "FROM article a "
+            "JOIN review_record r ON r.article_id = a.id "
+            "LEFT JOIN media_column c ON c.id = a.column_id "
+            "LEFT JOIN media_source s ON s.id = c.source_id "
+            "ORDER BY r.reviewed_at DESC LIMIT 1000"
+        )
+        rows = cur.fetchall()
     scored: list[dict] = []
     for r in rows:
-        title = (r["title"] or "")
-        with db.get_conn() as c:
-            cur = db.conn_cursor(c)
-            cur.execute("SELECT body_text FROM article WHERE id=%s", (r["id"],))
-            art = cur.fetchone()
-        body = (art["body_text"] if art else "") or ""
+        title = r["title"] or ""
+        body = r["body_text"] or ""
         title_l = title.lower()
         body_l = body.lower()
         score = 0
+        body_hits = 0
         for kw in kw_lower:
             if kw in title_l:
                 score += 5
-            if kw in body_l:
+            # 正文命中最多算 3 个关键词，避免长文因含多个词而虚高
+            if kw in body_l and body_hits < 3:
                 score += 1
+                body_hits += 1
         if score > 0:
             scored.append({
                 "title": title,

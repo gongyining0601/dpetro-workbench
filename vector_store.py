@@ -76,16 +76,17 @@ class NumpyVectorStore:
         if embs.ndim != 2 or embs.shape[0] != len(ids):
             raise ValueError(f"embs 形状 {embs.shape} 与 ids 数 {len(ids)} 不匹配")
 
-        # 维度变化（换了嵌入模型）→ 清空重建
-        if self.embs is not None and embs.shape[1] != self.embs.shape[1]:
+        # 维度变化（换了嵌入模型）→ 清空重建（DELETE 可回滚，与 UPSERT 同事务）
+        dim_changed = self.embs is not None and embs.shape[1] != self.embs.shape[1]
+        if dim_changed:
             print(f"[vector_store] 向量维度变化，重建索引")
-            self._clear_pg()
-            self.ids, self.embs = [], None
 
-        # 写 PG（单条 UPSERT；调用方一般一次几条到几十条，串行足够）
+        # 写 PG（清空 + UPSERT 在同一事务，失败可整体回滚）
         ts = now_iso()
         with get_conn() as c:
             cur = conn_cursor(c)
+            if dim_changed:
+                cur.execute("DELETE FROM article_embedding")
             for aid, vec in zip(ids, embs):
                 cur.execute(
                     "INSERT INTO article_embedding(article_id, embedding, updated_at) "
@@ -94,6 +95,9 @@ class NumpyVectorStore:
                     "embedding=EXCLUDED.embedding, updated_at=EXCLUDED.updated_at",
                     (int(aid), psycopg2.extras.Json(vec.tolist()), ts),
                 )
+
+        if dim_changed:
+            self.ids, self.embs = [], None
 
         # 同步内存索引
         index = {aid: i for i, aid in enumerate(self.ids)}
@@ -132,10 +136,10 @@ class NumpyVectorStore:
         return removed
 
     def _clear_pg(self) -> None:
-        """清空 PG 向量表（维度变化时重建用）。"""
+        """清空 PG 向量表（用 DELETE 而非 TRUNCATE，可被事务回滚）。"""
         with get_conn() as c:
             cur = conn_cursor(c)
-            cur.execute("TRUNCATE article_embedding")
+            cur.execute("DELETE FROM article_embedding")
         self.ids = []
         self.embs = None
 

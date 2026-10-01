@@ -22,6 +22,8 @@ from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 import ai_filter
@@ -50,10 +52,20 @@ _session: requests.Session | None = None
 
 
 def get_session() -> requests.Session:
+    """带重试的 Session：网络抖动（超时/5xx/连接重置）自动重试 3 次。"""
     global _session
     if _session is None:
         _session = requests.Session()
         _session.headers.update({"User-Agent": config.USER_AGENT})
+        retry = Retry(
+            total=3,
+            backoff_factor=1,  # 1s, 2s, 4s 退避
+            status_forcelist=(500, 502, 503, 504),
+            allowed_methods=["GET"],
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        _session.mount("http://", adapter)
+        _session.mount("https://", adapter)
     return _session
 
 
@@ -350,16 +362,12 @@ def parse_lnd_article(html: str) -> ArticleContent | None:
             body = txt
     if not body:
         body = soup.get_text("\n", strip=True)
-    # 作者：正文前 300 字找「记者XX」，后处理去掉结尾的「报道/报/通讯员」
-    # （贪婪匹配会把「报道」「报」吃进人名，靠 strip 修正）
+    # 作者：正文前 300 字找「记者XX报道/报/通讯员」格式
+    # 要求人名后紧跟「报道/报/通讯员」，避免把「记者采访了XX」误匹配为「采访了」
     author = None
-    m = re.search(r'记者\s*([\u4e00-\u9fa5]{2,4})', body[:300])
+    m = re.search(r'记者\s*([\u4e00-\u9fa5]{2,3})\s*(?:报道|报|通讯员)', body[:300])
     if m:
         name = m.group(1)
-        for suffix in ("报道", "报", "通讯员"):
-            if name.endswith(suffix) and len(name) > len(suffix):
-                name = name[:-len(suffix)]
-                break
         if name:
             author = "记者 " + name
     # 日期：从 URL 路径 /con/YYYYMM/DD/ 提取
@@ -493,20 +501,29 @@ def crawl_generic(src: dict) -> dict:
 # ---------------- 主流程 ----------------
 
 def crawl_all() -> dict:
-    """遍历 config.MEDIA_SOURCES，按 source_name 分派解析器。返回统计。"""
-    stats = {"sources": 0, "fetched": 0, "added": 0, "skipped": 0, "blocked": 0}
+    """遍历 config.MEDIA_SOURCES，按 source_name 分派解析器。返回统计。
+
+    每个媒体源独立 try-except：单个源出错（页面结构变化、网络故障等）
+    不影响其他源继续爬取，错误收集到 stats["errors"]。
+    """
+    stats = {"sources": 0, "fetched": 0, "added": 0, "skipped": 0, "blocked": 0, "errors": []}
     for src in config.MEDIA_SOURCES:
         stats["sources"] += 1
         name = src["name"]
         print(f"\n===== {name} =====")
-        if name == "中国石油报":
-            s = crawl_zgsyb(src)
-        elif name == "辽宁日报":
-            s = crawl_lnd(src)
-        else:
-            s = crawl_generic(src)
-        for k in ("fetched", "added", "skipped", "blocked"):
-            stats[k] += s.get(k, 0)
+        try:
+            if name == "中国石油报":
+                s = crawl_zgsyb(src)
+            elif name == "辽宁日报":
+                s = crawl_lnd(src)
+            else:
+                s = crawl_generic(src)
+            for k in ("fetched", "added", "skipped", "blocked"):
+                stats[k] += s.get(k, 0)
+        except Exception as e:
+            err_msg = f"{name}: {type(e).__name__}: {e}"
+            print(f"[crawl_all] 媒体源出错，跳过：{err_msg}")
+            stats["errors"].append(err_msg)
     return stats
 
 
