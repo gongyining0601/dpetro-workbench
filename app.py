@@ -162,7 +162,11 @@ with tab_history:
 # ----- Tab 3: 常规日历 + 投稿记录 -----
 with tab_calendar:
     st.subheader("未来两周常规选题预警")
-    upcoming = calendar_engine.upcoming_topics(horizon_days=14)
+    try:
+        upcoming = calendar_engine.upcoming_topics(horizon_days=14)
+    except Exception as _e:
+        upcoming = []
+        st.warning(f"日历加载失败：{_e}")
     if not upcoming:
         st.info("未来两周没有触发常规选题。可在 config.py 的 ROUTINE_TOPICS_SEED 中追加。")
     else:
@@ -176,7 +180,11 @@ with tab_calendar:
 
     st.divider()
     st.subheader("用稿规律（命中率）")
-    hit = calendar_engine.hit_rate_by_column()
+    try:
+        hit = calendar_engine.hit_rate_by_column()
+    except Exception as _e:
+        hit = []
+        st.warning(f"命中率统计加载失败：{_e}")
     if hit:
         st.dataframe(hit, use_container_width=True, hide_index=True)
     else:

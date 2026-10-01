@@ -39,10 +39,11 @@ def upcoming_topics(today: date | None = None, horizon_days: int = 14) -> list[d
     out: list[dict] = []
     with db.get_conn() as c:
         cur = db.conn_cursor(c)
-        rows = cur.execute(
+        cur.execute(
             "SELECT topic_name, start_month, start_day, end_month, end_day,"
             " recommended_column, lead_days, note FROM routine_calendar"
-        ).fetchall()
+        )
+        rows = cur.fetchall()
         for r in rows:
             try:
                 # 用 horizon 日期试一下是否在窗内（按 lead_days 提前感知）
@@ -69,13 +70,14 @@ def hit_rate_by_column() -> list[dict]:
     """从 submission 表统计各目标版面的命中率（用稿规律学习）。"""
     with db.get_conn() as c:
         cur = db.conn_cursor(c)
-        rows = cur.execute(
+        cur.execute(
             "SELECT target_column, "
             "COUNT(*) AS total, "
             "SUM(CASE WHEN result='录用' THEN 1 ELSE 0 END) AS hits "
             "FROM submission WHERE target_column IS NOT NULL "
             "GROUP BY target_column ORDER BY total DESC"
-        ).fetchall()
+        )
+        rows = cur.fetchall()
     return [{
         "版面": r["target_column"],
         "投稿": r["total"],
