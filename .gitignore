@@ -1,0 +1,50 @@
+# ============ Secrets & env (NEVER commit) ============
+.env
+.env.local
+.env.*.local
+
+# ============ Python venv ============
+.venv/
+venv/
+env/
+ENV/
+
+# ============ Python bytecode ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ============ Backups ============
+*.bak
+*.backup
+*.old
+*.orig
+
+# ============ IDE ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============ Streamlit runtime ============
+.streamlit/secrets.toml
+
+# ============ OS ============
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============ Logs ============
+*.log
+logs/
+
+# ============ Temp ============
+*.tmp
+*.temp
+_tmp/
+
+# ============ Legacy local data (moved to Supabase) ============
+data/
