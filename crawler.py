@@ -297,7 +297,7 @@ def crawl_zgsyb(src: dict) -> dict:
             cid = a.get("contentid")
             # 文章 URL：构造锚点定位到当期 SPA 页（正文已在 body_text 里，URL 仅供审核台点开参考）
             art_url = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/#con_{cid}"
-            rel, _tags = ai_filter.is_relevant(title, summary, body=body_text)
+            rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
             if not rel:
                 stats["skipped"] += 1
                 print(f"  [AI 跳过] {title}")
@@ -427,7 +427,7 @@ def crawl_lnd(src: dict) -> dict:
             art = parse_lnd_article(detail)
             if not art or not art.title or art.title == "(无标题)":
                 continue
-            rel, _tags = ai_filter.is_relevant(art.title, art.summary, body=art.body_text)
+            rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
             if not rel:
                 stats["skipped"] += 1
                 print(f"  [AI 跳过] {art.title}")
@@ -480,7 +480,7 @@ def crawl_generic(src: dict) -> dict:
             art = extract_article(detail)
             if not art:
                 continue
-            rel, _tags = ai_filter.is_relevant(art.title, art.summary, body=art.body_text)
+            rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
             if not rel:
                 stats["skipped"] += 1
                 print(f"  [AI 跳过] {art.title}")
