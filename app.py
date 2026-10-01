@@ -91,6 +91,8 @@ with st.sidebar:
             f"删除 {_chroma_stats.get('removed', 0)}"
         )
         st.caption("嵌入：BAAI/bge-large-zh-v1.5（Silicon Flow API）")
+        if _chroma_stats.get("error"):
+            st.caption(f"⚠️ 同步警告：{_chroma_stats['error']}")
 
 
 # ---------------- Tabs ----------------
