@@ -137,13 +137,13 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
 
     try:
         resp = _session.post(
-            config.SILICONFLOW_CHAT_URL,
+            config.SF_CHAT_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": config.SILICONFLOW_LLM_MODEL,
+                "model": config.SF_CHAT_MODEL,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
