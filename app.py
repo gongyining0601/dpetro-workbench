@@ -251,11 +251,11 @@ with tab_check:
         result = draft_checker.check(title or "", text or "", caption or "")
         st.markdown("### 🐛 问题清单")
         for i in result["issues"]:
-            st.markdown(f"- {i}")
+            st.markdown(f"- {_md_escape(i)}")
         st.markdown("### 🧭 三版适配")
         for ver, advice in result["versions"].items():
             with st.expander(ver, expanded=True):
                 for a in advice:
-                    st.markdown(f"- {a}")
+                    st.markdown(f"- {_md_escape(a)}")
     elif not (title or text):
         st.info("先填标题或正文，再点体检。")
