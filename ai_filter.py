@@ -138,6 +138,10 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
 
     失败时根据连续失败次数决定放行或拒绝（见 _decide_on_failure）。
     """
+    # 熔断：连续失败超过阈值后直接拒绝，避免 API 故障时大量无效调用
+    if _consecutive_failures >= FAIL_CIRCUIT_BREAKER:
+        return (False, [])
+
     api_key = os.getenv("SILICONFLOW_API_KEY", "")
 
     # 硬规则兜底：标题/正文命中石化行业关键词直接判相关，不依赖 LLM

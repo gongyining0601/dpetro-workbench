@@ -327,7 +327,10 @@ def crawl_zgsyb(src: dict) -> dict:
                     content_hash=content_hash(body_text), has_image=True, image_urls=image_urls,
                 )
             else:
-                rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
+                if not config.AI_FILTER_ENABLED:
+                    rel = True
+                else:
+                    rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
                 if not rel:
                     stats["skipped"] += 1
                     print(f"  [AI 跳过] {title}")
@@ -367,8 +370,8 @@ def parse_lnd_layout(html: str, base_url: str) -> list[ArticleLink]:
     return links
 
 
-def parse_lnd_article(html: str) -> ArticleContent | None:
-    """辽宁日报详情页：提取标题/作者/正文。"""
+def parse_lnd_article(html: str, url: str = "") -> ArticleContent | None:
+    """辽宁日报详情页：提取标题/作者/正文。日期从 URL 提取。"""
     soup = BeautifulSoup(html, "html.parser")
     has_image, image_urls = _extract_image_urls(soup)
     title = None
@@ -401,9 +404,9 @@ def parse_lnd_article(html: str) -> ArticleContent | None:
         name = m.group(1)
         if name:
             author = "记者 " + name
-    # 日期：从 URL 路径 /con/YYYYMM/DD/ 提取
+    # 日期：从文章 URL 路径 /con/YYYYMM/DD/ 提取
     publish_date = None
-    m = re.search(r'/con/(\d{6})/(\d{2})/', str(soup))
+    m = re.search(r'/con/(\d{6})/(\d{2})/', url)
     if m:
         ym, dd = m.group(1), m.group(2)
         publish_date = f"{ym[:4]}-{ym[4:6]}-{dd}"
@@ -456,7 +459,7 @@ def crawl_lnd(src: dict) -> dict:
             stats["fetched"] += 1
             if not detail:
                 continue
-            art = parse_lnd_article(detail)
+            art = parse_lnd_article(detail, link.url)
             if not art or not art.title or art.title == "(无标题)":
                 continue
             if art.has_image:
@@ -468,7 +471,10 @@ def crawl_lnd(src: dict) -> dict:
                     image_urls=art.image_urls,
                 )
             else:
-                rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
+                if not config.AI_FILTER_ENABLED:
+                    rel = True
+                else:
+                    rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
                 if not rel:
                     stats["skipped"] += 1
                     print(f"  [AI 跳过] {art.title}")
@@ -532,7 +538,10 @@ def crawl_generic(src: dict) -> dict:
                     image_urls=art.image_urls,
                 )
             else:
-                rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
+                if not config.AI_FILTER_ENABLED:
+                    rel = True
+                else:
+                    rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
                 if not rel:
                     stats["skipped"] += 1
                     print(f"  [AI 跳过] {art.title}")
