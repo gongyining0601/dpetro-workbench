@@ -43,11 +43,20 @@ def _safe_anchor(label: str, url: str) -> str:
 
 st.title("📰 锦州石化投稿辅助台")
 
-# 启动时初始化数据库
-try:
-    db.init_db()
-except Exception as e:
-    st.error(f"DB 初始化失败：{e}")
+# 启动时初始化数据库（带重试：连接池失效时用户可点击重试恢复）
+_db_ok = False
+for _attempt in range(2):  # 自动重试1次（连接池可能刚重建）
+    try:
+        db.init_db()
+        _db_ok = True
+        break
+    except Exception as e:
+        _db_err = e
+        db._reset_pool()  # 连接可能失效，重建池后重试
+if not _db_ok:
+    st.error(f"DB 连接失败（{_db_err}）。点击下方按钮重试。")
+    if st.button("🔄 重试连接", type="primary"):
+        st.rerun()
     st.stop()
 
 # 向量索引同步：用 session_state 缓存，避免每次 rerun 都调 embedding API
@@ -124,23 +133,45 @@ with tab_review:
                                      r["body_text"][:500], height=160,
                                      disabled=True, key=f"body_{r['id']}")
                     st.markdown(_safe_anchor("原文链接", r['url']))
+            def _do_review(article_id, decision):
+                """审核操作：连接断开时自动重建池并重试一次。"""
+                import psycopg2 as _pg
+                try:
+                    db.set_review(article_id, decision)
+                    return True
+                except (_pg.OperationalError, _pg.InterfaceError):
+                    db._reset_pool()
+                    try:
+                        db.set_review(article_id, decision)
+                        return True
+                    except Exception:
+                        return False
+                except Exception:
+                    return False
+
             with cols[1]:
                 if st.button("相关", key=f"rel_{r['id']}", type="primary"):
-                    db.set_review(r["id"], "相关")
-                    st.session_state["_force_vec_sync"] = True
-                    st.toast("已标「相关」", icon="✅")
+                    if _do_review(r["id"], "相关"):
+                        st.session_state["_force_vec_sync"] = True
+                        st.toast("已标「相关」", icon="✅")
+                    else:
+                        st.error("连接失败，请重试")
                     st.rerun()
             with cols[2]:
                 if st.button("借鉴", key=f"bor_{r['id']}"):
-                    db.set_review(r["id"], "借鉴")
-                    st.session_state["_force_vec_sync"] = True
-                    st.toast("已标「借鉴」", icon="💡")
+                    if _do_review(r["id"], "借鉴"):
+                        st.session_state["_force_vec_sync"] = True
+                        st.toast("已标「借鉴」", icon="💡")
+                    else:
+                        st.error("连接失败，请重试")
                     st.rerun()
             with cols[3]:
                 if st.button("无关", key=f"irr_{r['id']}"):
-                    db.set_review(r["id"], "无关")
-                    st.session_state["_force_vec_sync"] = True
-                    st.toast("已标「无关」", icon="🚫")
+                    if _do_review(r["id"], "无关"):
+                        st.session_state["_force_vec_sync"] = True
+                        st.toast("已标「无关」", icon="🚫")
+                    else:
+                        st.error("连接失败，请重试")
                     st.rerun()
 
 
@@ -188,7 +219,7 @@ with tab_calendar:
         hit = []
         st.warning(f"命中率统计加载失败：{_e}")
     if hit:
-        st.dataframe(hit, use_container_width=True, hide_index=True)
+        st.dataframe(hit, width="stretch", hide_index=True)
     else:
         st.info("还没有投稿记录。下面录一条试试。")
 

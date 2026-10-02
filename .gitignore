@@ -48,3 +48,8 @@ _tmp/
 
 # ============ Legacy local data (moved to Supabase) ============
 data/
+
+# ============ Local test & cleanup scripts ============
+test_security.py
+cleanup_bad_articles.py
+full_test.py

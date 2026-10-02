@@ -136,24 +136,62 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _reset_pool():
+    """销毁并重建连接池。用于所有连接被服务器断开后恢复。"""
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.closeall()
+        except Exception:
+            pass
+    _pool = None
+
+
 @contextmanager
 def get_conn():
-    """从连接池获取连接；自动提交/回滚，用完归还池。返回 RealDictCursor（dict-like 行）。"""
+    """从连接池获取连接；自动提交/回滚，用完归还池。
+
+    健壮性：Supabase 空闲超时会关闭连接，ThreadedConnectionPool 不会自动重建。
+    因此检测到连接断开时，不仅移除该连接，还会重建整个池。
+    """
     pool = _get_pool()
     conn = pool.getconn()
-    # 健康检查：连接断开则丢弃重建
+    # 健康检查：连接断开则丢弃
     if conn.closed:
-        pool.putconn(conn, close=True)
+        try:
+            pool.putconn(conn, close=True)
+        except Exception:
+            pass
+        # 重新获取；若仍断开，说明池已整体失效，重建池
         conn = pool.getconn()
+        if conn.closed:
+            _reset_pool()
+            pool = _get_pool()
+            conn = pool.getconn()
     conn.autocommit = False
     try:
         yield conn
-        conn.commit()
+        if not conn.closed:
+            conn.commit()
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        # 连接在使用中被断开：重建池后重抛，让上层重试
+        _reset_pool()
+        raise
     except Exception:
-        conn.rollback()
+        if not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        pool.putconn(conn)
+        if conn.closed:
+            try:
+                pool.putconn(conn, close=True)
+            except Exception:
+                pass
+        else:
+            pool.putconn(conn)
 
 
 def _exec(c, sql, params=None):
@@ -235,7 +273,7 @@ def fetch_unreviewed(limit: int = 50):
         cur = conn_cursor(c)
         cur.execute(
             "SELECT a.id, a.title, a.url, a.author, a.publish_date, a.summary, "
-            "a.body_text, a.crawled_at, c.name AS column_name, s.name AS source_name "
+            "LEFT(a.body_text, 500) AS body_text, a.crawled_at, c.name AS column_name, s.name AS source_name "
             "FROM article a "
             "LEFT JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
@@ -261,16 +299,23 @@ def fetch_reviewed(limit: int = 100):
 
 
 def set_review(article_id: int, decision: str, note: str = "") -> None:
+    """标记审核结论。decision=无关 时直接删除文章（不保留记录）。"""
     with get_conn() as c:
         cur = conn_cursor(c)
-        cur.execute(
-            "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
-            "VALUES (%s,%s,%s,%s) "
-            "ON CONFLICT (article_id) DO UPDATE SET "
-            "decision=EXCLUDED.decision, note=EXCLUDED.note, "
-            "reviewed_at=EXCLUDED.reviewed_at",
-            (article_id, decision, note, now_iso()),
-        )
+        if decision == "无关":
+            # 无关稿件直接删除，不留痕迹
+            cur.execute("DELETE FROM article_embedding WHERE article_id=%s", (article_id,))
+            cur.execute("DELETE FROM review_record WHERE article_id=%s", (article_id,))
+            cur.execute("DELETE FROM article WHERE id=%s", (article_id,))
+        else:
+            cur.execute(
+                "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
+                "VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (article_id) DO UPDATE SET "
+                "decision=EXCLUDED.decision, note=EXCLUDED.note, "
+                "reviewed_at=EXCLUDED.reviewed_at",
+                (article_id, decision, note, now_iso()),
+            )
 
 
 # ---------- DAO: column / source ----------
@@ -304,36 +349,28 @@ def list_columns_with_urls():
 
 
 def stats_overview():
+    """合并为单条 SQL：6 个子查询一次网络往返返回全部指标。"""
     with get_conn() as c:
         cur = conn_cursor(c)
-        cur.execute("SELECT COUNT(*) AS n FROM article")
-        n_articles = cur.fetchone()["n"]
         cur.execute(
-            "SELECT COUNT(*) AS n FROM article a LEFT JOIN review_record r "
-            "ON r.article_id = a.id WHERE r.id IS NULL"
+            "SELECT "
+            "(SELECT COUNT(*) FROM article) AS total_articles, "
+            "(SELECT COUNT(*) FROM article a "
+            " LEFT JOIN review_record r ON r.article_id = a.id "
+            " WHERE r.id IS NULL) AS unreviewed, "
+            "(SELECT COUNT(*) FROM review_record WHERE decision='相关') AS relevant, "
+            "(SELECT COUNT(*) FROM review_record WHERE decision='借鉴') AS borrow, "
+            "(SELECT COUNT(*) FROM submission) AS submissions, "
+            "(SELECT COUNT(*) FROM submission WHERE result='录用') AS published"
         )
-        n_unreviewed = cur.fetchone()["n"]
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM review_record WHERE decision='相关'"
-        )
-        n_relevant = cur.fetchone()["n"]
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM review_record WHERE decision='借鉴'"
-        )
-        n_borrow = cur.fetchone()["n"]
-        cur.execute("SELECT COUNT(*) AS n FROM submission")
-        n_submissions = cur.fetchone()["n"]
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM submission WHERE result='录用'"
-        )
-        n_published = cur.fetchone()["n"]
+        row = cur.fetchone()
     return {
-        "总稿件": n_articles,
-        "待审": n_unreviewed,
-        "相关": n_relevant,
-        "借鉴": n_borrow,
-        "投稿次数": n_submissions,
-        "录用次数": n_published,
+        "总稿件": row["total_articles"],
+        "待审": row["unreviewed"],
+        "相关": row["relevant"],
+        "借鉴": row["borrow"],
+        "投稿次数": row["submissions"],
+        "录用次数": row["published"],
     }
 
 
