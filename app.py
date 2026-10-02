@@ -53,17 +53,24 @@ _db_ok = False
 for _attempt in range(2):  # 自动重试1次（连接池可能刚重建）
     try:
         db.init_db()
-        db.cleanup_old_unreviewed()  # 清理90天前未审核稿件
         _db_ok = True
         break
     except Exception as e:
         _db_err = e
         db._reset_pool()  # 连接可能失效，重建池后重试
 if not _db_ok:
-    st.error(f"DB 连接失败（{_db_err}）。点击下方按钮重试。")
+    st.error(f"DB 初始化失败（{type(_db_err).__name__}: {_db_err}）。点击下方按钮重试。")
     if st.button("🔄 重试连接", type="primary"):
         st.rerun()
     st.stop()
+
+# 清理过期未审核稿件（非阻塞：失败不影响审核台使用，只记日志）
+try:
+    _cleaned = db.cleanup_old_unreviewed()
+    if _cleaned:
+        config.logger.info(f"启动时清理 {_cleaned} 条过期未审核稿件")
+except Exception as _e:
+    config.logger.warning(f"cleanup_old_unreviewed 失败（不影响审核台使用）: {_e}")
 
 # 向量索引同步：用 session_state 缓存，避免每次 rerun 都调 embedding API
 # 审核操作后会置 _force_vec_sync=True 强制同步；否则每 VEC_SYNC_INTERVAL 秒同步一次
@@ -195,7 +202,7 @@ with tab_history:
         st.info("还没有审核记录。去「今日审核」审几篇试试。")
     else:
         for r in rows:
-            tag = {"相关": "🟢 相关", "借鉴": "💡 借鉴"}.get(r["decision"], r["decision"])
+            tag = {"相关": "🟢 相关", "借鉴": "💡 借鉴", "无关": "🚫 无关"}.get(r["decision"], r["decision"])
             with st.expander(f"{tag} | {r['title']} | {r['source_name']}/{r['column_name']}"):
                 if r.get("publish_date"):
                     st.caption(f"发布日期：{r['publish_date']}  |  审核时间：{r['reviewed_at']}")
@@ -486,7 +493,7 @@ with tab_writing:
     sub_writer, sub_check = st.tabs(["✍️ 行者撰稿", "📝 成稿体检"])
     with sub_writer:
         st.subheader("✍️ 行者撰稿")
-        st.caption("AI 辅助生成新闻稿初稿（使用免费模型 GLM-4-9B-Chat）。")
+        st.caption("AI 辅助生成新闻稿初稿（智谱 GLM-4.7-Flash，失败回退腾讯云 deepseek）。")
         with st.form("writer_form"):
             topic = st.text_input("选题关键词*", placeholder="如：春检、安全月、冬季保供")
             col1, col2 = st.columns(2)
@@ -639,11 +646,13 @@ with tab_help:
 | 功能 | 服务商 | 费用 |
 |------|--------|------|
 | 数据库 | Supabase | 免费（500MB） |
-| AI 写稿/校对 | 腾讯云 TokenHub | 免费额度 100 万 tokens（90天） |
-| AI 初选过滤 | Silicon Flow | 永久免费模型 |
-| 语义嵌入 | Silicon Flow | 永久免费模型 |
+| AI 写稿主力 | 智谱 GLM-4.7-Flash | 免费模型，永久可用 |
+| AI 写稿/校对后备 | 腾讯云 TokenHub（deepseek） | 免费额度 100 万 tokens（90 天） |
+| AI 初选主力 | 智谱 GLM-4.7-Flash | 免费模型，永久可用 |
+| AI 初选后备 | Silicon Flow（Qwen） | 永久免费模型 |
+| 语义嵌入 | Silicon Flow（bge-large-zh-v1.5） | 永久免费模型 |
 
-> 目前**零成本运行**。腾讯云额度 90 天后需关注，到期前会报错提醒。
+> 目前**零成本运行**。智谱免费模型永久可用；腾讯云额度 90 天后需关注，到期前会报错提醒；智谱 429 限流时会自动回退后备链路，不影响使用。
 
 ---
 
@@ -657,7 +666,7 @@ with tab_help:
 ### ❓ 常见问题
 
 **Q：AI 写稿/校对用的是什么模型？**
-A：腾讯云 TokenHub 的 deepseek-v4-flash-202605，免费额度 100 万 tokens。
+A：默认智谱 GLM-4.7-Flash（免费，永久可用）；智谱失败/429 限流时自动回退腾讯云 TokenHub 的 deepseek-v4-flash-202605（免费额度 100 万 tokens，90 天有效期）。
 
 **Q：点「无关」后文章去哪了？**
 A：直接删除，不保留记录。确认无关再点。
@@ -666,5 +675,5 @@ A：直接删除，不保留记录。确认无关再点。
 A：是的。AI 过滤只保留石油石化产业链相关的稿件。
 
 **Q：AI 校对返回空怎么办？**
-A：检查腾讯云 API key 是否有效，或额度是否用完。
+A：先检查智谱 API key（ZHIPU_API_KEY）是否有效；智谱 429 限流时会自动回退腾讯云，再查腾讯云 API key（TENCENTCLOUD_API_KEY）与额度。
     """)

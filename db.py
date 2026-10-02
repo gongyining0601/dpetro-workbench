@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone, timedelta, timedelta
+from datetime import datetime, timezone, timedelta
 
 import psycopg2
 import psycopg2.extras
@@ -318,22 +318,28 @@ def fetch_reviewed(limit: int = 100):
 
 
 def set_review(article_id: int, decision: str, note: str = "") -> None:
-    """标记审核结论。decision=无关 时直接删除文章（不保留记录）。"""
+    """标记审核结论。三种 decision（相关/借鉴/无关）均写入 review_record，便于事后复盘。
+
+    无关稿件：保留 article 行（不删，可追溯），仅从向量索引删除避免污染对标库。
+    「今日审核」用 LEFT JOIN review_record WHERE r.id IS NULL 找未审核，
+    软删后 article 有 review_record，自动从待审列表消失。
+    """
     with get_conn() as c:
         cur = conn_cursor(c)
+        # 任何 decision 都写入 review_record（UNIQUE article_id 保证一篇一记录）
+        cur.execute(
+            "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
+            "VALUES (%s,%s,%s,%s) "
+            "ON CONFLICT (article_id) DO UPDATE SET "
+            "decision=EXCLUDED.decision, note=EXCLUDED.note, "
+            "reviewed_at=EXCLUDED.reviewed_at",
+            (article_id, decision, note, now_iso()),
+        )
+        # 无关稿件从向量索引删除（避免污染对标库），但保留 article 行可追溯
         if decision == "无关":
-            # 无关稿件直接删除，不留痕迹
-            cur.execute("DELETE FROM article_embedding WHERE article_id=%s", (article_id,))
-            cur.execute("DELETE FROM review_record WHERE article_id=%s", (article_id,))
-            cur.execute("DELETE FROM article WHERE id=%s", (article_id,))
-        else:
             cur.execute(
-                "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
-                "VALUES (%s,%s,%s,%s) "
-                "ON CONFLICT (article_id) DO UPDATE SET "
-                "decision=EXCLUDED.decision, note=EXCLUDED.note, "
-                "reviewed_at=EXCLUDED.reviewed_at",
-                (article_id, decision, note, now_iso()),
+                "DELETE FROM article_embedding WHERE article_id=%s",
+                (article_id,),
             )
 
 
@@ -401,16 +407,28 @@ if __name__ == "__main__":
 def cleanup_old_unreviewed(days: int = 90) -> int:
     """清理超过指定天数的未审核稿件，防止数据库无限增长。
 
-    仅删除 status='待审' 且 publish_date < now-days 的稿件，
-    同时清理其嵌入向量和审核记录。返回删除数量。
+    通过 LEFT JOIN review_record WHERE r.id IS NULL 判定"未审核"，
+    publish_date 用 ISO 日期字符串比较（与 now_iso 一致）。
+    article_embedding 已有 ON DELETE CASCADE，删 article 时自动连带删。
+    失败时抛异常由上层 try/except 兜住，不阻塞 init_db。
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
     deleted = 0
-    with conn_cursor() as cur:
-        cur.execute("SELECT id FROM article WHERE status = '待审' AND publish_date < %s", (cutoff,))
-        ids = [r[0] for r in cur.fetchall()]
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT a.id FROM article a "
+            "LEFT JOIN review_record r ON r.article_id = a.id "
+            "WHERE r.id IS NULL "
+            "AND a.publish_date IS NOT NULL "
+            "AND a.publish_date <> '' "
+            "AND a.publish_date < %s",
+            (cutoff_iso,),
+        )
+        ids = [r["id"] for r in cur.fetchall()]
         for aid in ids:
-            cur.execute("DELETE FROM article_embedding WHERE article_id = %s", (aid,))
+            # article_embedding ON DELETE CASCADE 会自动连带删；
+            # review_record 对未审核稿件本就不存在，保险起见显式删一次（不报错）
             cur.execute("DELETE FROM review_record WHERE article_id = %s", (aid,))
             cur.execute("DELETE FROM article WHERE id = %s", (aid,))
             deleted += 1

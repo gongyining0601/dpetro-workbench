@@ -441,5 +441,20 @@ def angle_advice(keywords: list[str], matched: list[dict] | None = None) -> list
 
 
 if __name__ == "__main__":
-    print("同步向量索引：", ensure_index_synced())
-    print("检索：", [(m["title"][:20], m["score"]) for m in match(["春检", "催化"])])
+    """CI 入口：同步 PG 已审稿到向量索引。
+
+    GitHub Actions workflow 在跑完 crawler.py 后调用本入口，
+    把新增的"相关/借鉴"稿件 embedding 起来写入 article_embedding 表。
+    本地也可手动跑：python -B topic_matcher.py
+    """
+    stats = ensure_index_synced()
+    print(f"[topic_matcher] 同步完成："
+          f"in_db={stats.get('in_sqlite', 0)}, "
+          f"in_index={stats.get('in_index', 0)}, "
+          f"added={stats.get('added', 0)}, "
+          f"removed={stats.get('removed', 0)}, "
+          f"fallback={stats.get('fallback', False)}")
+    if stats.get("error"):
+        print(f"[topic_matcher] 同步警告：{stats['error']}")
+    elif stats.get("fallback"):
+        print("[topic_matcher] 已回退关键词检索（Silicon Flow API 或向量库初始化失败）")
