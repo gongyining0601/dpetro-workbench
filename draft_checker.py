@@ -1,4 +1,4 @@
-"""成稿体检器：投稿前对草稿做四项质量检查 + 三版适配建议。
+﻿"""成稿体检器：投稿前对草稿做四项质量检查 + 三版适配建议。
 
 MVP 实现：基于正则的轻量规则，零依赖、零外部 API。
 """
@@ -58,6 +58,60 @@ def check(draft_title: str, draft_text: str, caption: str = "") -> dict:
         versions[ver] = advice
     return {"issues": issues or ["未发现明显问题"], "versions": versions}
 
+import os
+import requests as _requests
+
+_SF_BASE = "https://api.siliconflow.cn/v1/chat/completions"
+_MODEL_PROOFREAD = "THUDM/glm-4-9b-chat"
+
+
+def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
+    """AI 深度校对：错别字、标点、语病、新闻规范、数字单位、敏感表述。"""
+    api_key = os.getenv("SILICONFLOW_API_KEY", "")
+    if not api_key:
+        return {"ai_issues": ["未配置 SILICONFLOW_API_KEY，跳过 AI 校对"], "ok": False}
+
+    sys_prompt = (
+        "你是一位资深新闻出版校对编辑。请对稿件进行校对，找出以下问题："
+        "1. 错别字、多字漏字"
+        "2. 标点符号错误"
+        "3. 语法语病、语句不通顺"
+        "4. 新闻写作规范问题（导语缺失、结构混乱等）"
+        "5. 数字、单位、日期格式不统一"
+        "6. 敏感表述或政治表述不当"
+        "只列出确实存在的问题，不要无中生有。"
+    )
+    user_msg = f"标题：{draft_title}\n\n正文：\n{draft_text}\n"
+    if caption:
+        user_msg += f"\n图片说明：{caption}\n"
+    user_msg += "\n请以 JSON 数组格式返回问题列表，每个元素是一个问题描述字符串。如无问题返回空数组 []。"
+
+    try:
+        resp = _requests.post(
+            _SF_BASE,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": _MODEL_PROOFREAD,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 1024,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        import re as _re
+        m = _re.search(r"\[.*\]", content, _re.S)
+        if m:
+            import json as _json
+            issues = _json.loads(m.group(0))
+            return {"ai_issues": issues if issues else ["AI 校对未发现问题"], "ok": True}
+        return {"ai_issues": [content] if content else ["AI 校对未发现问题"], "ok": True}
+    except Exception as e:
+        return {"ai_issues": [f"AI 校对失败：{e}"], "ok": False}
 
 if __name__ == "__main__":
     r = check("春检攻坚圆满收官",

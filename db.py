@@ -1,4 +1,4 @@
-"""PostgreSQL 建表 + 数据访问层（DAO）。
+﻿"""PostgreSQL 建表 + 数据访问层（DAO）。
 
 2026-09-29 改造（方案 A 上云版）：
 - 从 SQLite 迁到 Supabase PostgreSQL（数据持久化到云端，多端访问）
@@ -260,10 +260,10 @@ def upsert_article(column_id: int, *, title: str, url: str, author: str | None,
         cur.execute(
             "INSERT INTO article"
             "(column_id, title, url, author, publish_date, summary, body_text,"
-            " content_hash, crawled_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            " content_hash, crawled_at, has_image) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (url) DO NOTHING",
             (column_id, title, url, author, publish_date, summary,
-             body_text, content_hash, now_iso()),
+             body_text, content_hash, now_iso(), has_image),
         )
         return cur.rowcount > 0
 
@@ -278,11 +278,25 @@ def fetch_unreviewed(limit: int = 50):
             "LEFT JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
             "LEFT JOIN media_source s ON s.id = c.source_id "
-            "WHERE r.id IS NULL ORDER BY a.crawled_at DESC LIMIT %s", (limit,)
+            "WHERE r.id IS NULL AND a.has_image = FALSE ORDER BY a.crawled_at DESC LIMIT %s", (limit,)
         )
         return cur.fetchall()
 
 
+
+def fetch_image_articles(limit: int = 200):
+    """图文素材库（有图片的稿件，不限行业）。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT a.id, a.title, a.url, a.author, a.publish_date, a.summary, "
+            "LEFT(a.body_text, 500) AS body_text, a.crawled_at, c.name AS column_name, s.name AS source_name "
+            "FROM article a "
+            "LEFT JOIN media_column c ON c.id = a.column_id "
+            "LEFT JOIN media_source s ON s.id = c.source_id "
+            "WHERE a.has_image = TRUE ORDER BY a.crawled_at DESC LIMIT %s", (limit,)
+        )
+        return cur.fetchall()
 def fetch_reviewed(limit: int = 100):
     with get_conn() as c:
         cur = conn_cursor(c)

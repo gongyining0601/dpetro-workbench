@@ -1,4 +1,4 @@
-"""礼貌爬虫：robots.txt 检查 + 节流 + 列表页/详情页解析。
+﻿"""礼貌爬虫：robots.txt 检查 + 节流 + 列表页/详情页解析。
 
 架构（2026-09-29 重构，按媒体源分派解析器）：
 - 中国石油报（epaper.cnpc.com.cn）：数字报是 SPA 单页应用，但 epaperObject JSON
@@ -44,6 +44,7 @@ class ArticleContent:
     publish_date: str | None
     summary: str | None
     body_text: str | None
+    has_image: bool = False
 
 
 # ---------------- 网络层 ----------------
@@ -297,16 +298,24 @@ def crawl_zgsyb(src: dict) -> dict:
             cid = a.get("contentid")
             # 文章 URL：构造锚点定位到当期 SPA 页（正文已在 body_text 里，URL 仅供审核台点开参考）
             art_url = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/#con_{cid}"
-            rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
-            if not rel:
-                stats["skipped"] += 1
-                print(f"  [AI 跳过] {title}")
-                continue
-            added = db.upsert_article(
-                col_id, title=title, url=art_url, author=author,
-                publish_date=cur_date_iso, summary=summary, body_text=body_text,
-                content_hash=content_hash(body_text),
-            )
+            has_image = bool(re.search(r"<img\s", body_html, re.I))
+            if has_image:
+                added = db.upsert_article(
+                    col_id, title=title, url=art_url, author=author,
+                    publish_date=cur_date_iso, summary=summary, body_text=body_text,
+                    content_hash=content_hash(body_text), has_image=True,
+                )
+            else:
+                rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
+                if not rel:
+                    stats["skipped"] += 1
+                    print(f"  [AI 跳过] {title}")
+                    continue
+                added = db.upsert_article(
+                    col_id, title=title, url=art_url, author=author,
+                    publish_date=cur_date_iso, summary=summary, body_text=body_text,
+                    content_hash=content_hash(body_text), has_image=False,
+                )
             if added:
                 stats["added"] += 1
                 print(f"  + {title}")
@@ -427,16 +436,25 @@ def crawl_lnd(src: dict) -> dict:
             art = parse_lnd_article(detail)
             if not art or not art.title or art.title == "(无标题)":
                 continue
-            rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
-            if not rel:
-                stats["skipped"] += 1
-                print(f"  [AI 跳过] {art.title}")
-                continue
-            added = db.upsert_article(
-                col_id, title=art.title, url=link.url, author=art.author,
-                publish_date=art.publish_date, summary=art.summary,
-                body_text=art.body_text, content_hash=content_hash(art.body_text),
-            )
+            if art.has_image:
+                added = db.upsert_article(
+                    col_id, title=art.title, url=link.url, author=art.author,
+                    publish_date=art.publish_date, summary=art.summary,
+                    body_text=art.body_text, content_hash=content_hash(art.body_text),
+                    has_image=True,
+                )
+            else:
+                rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
+                if not rel:
+                    stats["skipped"] += 1
+                    print(f"  [AI 跳过] {art.title}")
+                    continue
+                added = db.upsert_article(
+                    col_id, title=art.title, url=link.url, author=art.author,
+                    publish_date=art.publish_date, summary=art.summary,
+                    body_text=art.body_text, content_hash=content_hash(art.body_text),
+                    has_image=False,
+                )
             if added:
                 stats["added"] += 1
                 print(f"  + {art.title}")
@@ -480,16 +498,25 @@ def crawl_generic(src: dict) -> dict:
             art = extract_article(detail)
             if not art:
                 continue
-            rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
-            if not rel:
-                stats["skipped"] += 1
-                print(f"  [AI 跳过] {art.title}")
-                continue
-            added = db.upsert_article(
-                col_id, title=art.title, url=link.url, author=art.author,
-                publish_date=art.publish_date, summary=art.summary,
-                body_text=art.body_text, content_hash=content_hash(art.body_text),
-            )
+            if art.has_image:
+                added = db.upsert_article(
+                    col_id, title=art.title, url=link.url, author=art.author,
+                    publish_date=art.publish_date, summary=art.summary,
+                    body_text=art.body_text, content_hash=content_hash(art.body_text),
+                    has_image=True,
+                )
+            else:
+                rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
+                if not rel:
+                    stats["skipped"] += 1
+                    print(f"  [AI 跳过] {art.title}")
+                    continue
+                added = db.upsert_article(
+                    col_id, title=art.title, url=link.url, author=art.author,
+                    publish_date=art.publish_date, summary=art.summary,
+                    body_text=art.body_text, content_hash=content_hash(art.body_text),
+                    has_image=False,
+                )
             if added:
                 stats["added"] += 1
                 print(f"  + {art.title}")

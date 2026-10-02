@@ -1,4 +1,4 @@
-"""Streamlit 审核台主入口。
+﻿"""Streamlit 审核台主入口。
 
 启动：
     streamlit run app.py
@@ -23,8 +23,9 @@ import db
 import calendar_engine
 import topic_matcher
 import draft_checker
+import ai_writer
 
-st.set_page_config(page_title="锦州石化投稿辅助台", layout="wide")
+st.set_page_config(page_title="行者", layout="wide")
 
 
 def _md_escape(s: str) -> str:
@@ -41,7 +42,7 @@ def _safe_anchor(label: str, url: str) -> str:
         return f"{_md_escape(label)}：{_md_escape(safe_url)}"
     return f"[{_md_escape(label)}]({safe_url})"
 
-st.title("📰 锦州石化投稿辅助台")
+st.title("🧭 行者")
 
 # 启动时初始化数据库（带重试：连接池失效时用户可点击重试恢复）
 _db_ok = False
@@ -105,8 +106,8 @@ with st.sidebar:
 
 
 # ---------------- Tabs ----------------
-tab_review, tab_history, tab_calendar, tab_match, tab_check, tab_help = st.tabs(
-    ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "🎯 选题对标", "📝 成稿体检", "❓ 使用说明"]
+tab_review, tab_history, tab_calendar, tab_match, tab_check, tab_image, tab_writer, tab_help = st.tabs(
+    ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "🎯 选题对标", "📝 成稿体检", "📷 图文素材", "✍️ 行者撰稿", "❓ 使用说明"]
 )
 
 
@@ -277,16 +278,23 @@ with tab_match:
 
 # ----- Tab 5: 成稿体检 -----
 with tab_check:
-    st.subheader("成稿体检器")
+    st.subheader("📝 成稿体检器")
     st.caption("投稿前自检：模糊时间 / 空泛数据 / 绝对化用词 / 图片说明质量。")
     title = st.text_input("稿件标题")
     text = st.text_area("稿件正文", height=220)
     caption = st.text_input("图片说明", placeholder="如：图为催化主操张三在调整反应温度")
-    if st.button("体检", type="primary") and (title or text):
+    mode = st.radio("校对模式", ["快速模式（仅规则）", "深度模式（规则+AI校对）"], horizontal=True)
+    if st.button("开始体检", type="primary") and (title or text):
         result = draft_checker.check(title or "", text or "", caption or "")
         st.markdown("### 🐛 问题清单")
         for i in result["issues"]:
             st.markdown(f"- {_md_escape(i)}")
+        if "深度" in mode:
+            with st.spinner("AI 校对中..."):
+                ai_r = draft_checker.ai_proofread(title or "", text or "", caption or "")
+            st.markdown("### 🤖 AI 深度校对")
+            for i in ai_r.get("ai_issues", []):
+                st.markdown(f"- {_md_escape(i)}")
         st.markdown("### 🧭 三版适配")
         for ver, advice in result["versions"].items():
             with st.expander(ver, expanded=True):
@@ -295,9 +303,52 @@ with tab_check:
     elif not (title or text):
         st.info("先填标题或正文，再点体检。")
 
-# ----- Tab 6: 使用说明 -----
+# ----- Tab 6: 图文素材 -----
+with tab_image:
+    st.subheader("📷 图文素材库")
+    st.caption("所有带图片的稿件（不限行业），可作图片新闻参考。")
+    imgs = db.fetch_image_articles(200)
+    st.metric("图文稿件", len(imgs))
+    for a in imgs:
+        with st.expander(f"[{a['source_name']}/{a['column_name']}] {a['title']}", expanded=False):
+            st.caption(f"{a['publish_date'] or ''}")
+            if a.get("summary"):
+                st.markdown(_md_escape(a["summary"]))
+            if a.get("body_text"):
+                st.markdown(_md_escape(a["body_text"][:1000]))
+            if a.get("url"):
+                st.markdown(f"[原文链接]({_safe_anchor(a['url'])})")
+
+# ----- Tab 7: 行者撰稿（AI辅助写稿） -----
+with tab_writer:
+    st.subheader("✍️ 行者撰稿")
+    st.caption("AI 辅助生成新闻稿初稿（使用免费模型 GLM-4-9B-Chat）。")
+    with st.form("writer_form"):
+        topic = st.text_input("选题关键词*", placeholder="如：春检、安全月、冬季保供")
+        col1, col2 = st.columns(2)
+        with col1:
+            angle = st.text_input("写作角度（可选）", placeholder="如：人物故事、数据对比")
+            target = st.selectbox("目标媒体", ["中国石油报", "辽宁日报", "企业内网"])
+        with col2:
+            word_count = st.slider("目标字数", 300, 2000, 800, 100)
+        facts = st.text_area("已知事实/数据（可选）", placeholder="如：处理量同比+15%，创历史新高")
+        submitted = st.form_submit_button("生成初稿", type="primary")
+    if submitted:
+        if not topic.strip():
+            st.warning("请输入选题关键词")
+        else:
+            with st.spinner("AI 正在撰写..."):
+                r = ai_writer.write_article(topic, angle, word_count, target, facts)
+            if r["ok"]:
+                if r["title"]:
+                    st.text_input("标题", value=r["title"])
+                st.text_area("初稿", value=r["body"], height=400)
+                st.success("生成完成，可复制后自行修改。")
+            else:
+                st.error(f"生成失败：{r['error']}")
+# ----- Tab 8: 使用说明 -----
 with tab_help:
-    st.subheader("锦州石化投稿辅助台 · 使用说明")
+    st.subheader("🧭 行者 · 使用说明")
 
     st.markdown("""
     ### 🚀 快速上手
