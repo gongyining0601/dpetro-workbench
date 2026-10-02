@@ -287,7 +287,7 @@ def fetch_reviewed(limit: int = 100):
     with get_conn() as c:
         cur = conn_cursor(c)
         cur.execute(
-            "SELECT a.id, a.title, a.url, a.publish_date, r.decision, r.note, "
+            "SELECT a.id, a.title, a.url, a.publish_date, a.body_text, r.decision, r.note, "
             "r.reviewed_at, c.name AS column_name, s.name AS source_name "
             "FROM article a "
             "JOIN review_record r ON r.article_id = a.id "

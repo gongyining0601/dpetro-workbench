@@ -183,13 +183,15 @@ with tab_history:
         st.info("还没有审核记录。去「今日审核」审几篇试试。")
     else:
         for r in rows:
-            tag = {"相关": "🟢", "借鉴": "🟡", "无关": "⚪"}.get(r["decision"], "❓")
-            st.markdown(
-                f"{tag} **{_md_escape(r['title'])}** "
-                f"`{_md_escape(r['source_name'])}/{_md_escape(r['column_name'])}` "
-                f"{_md_escape(str(r['publish_date'] or ''))} "
-                f"_{_md_escape(str(r['reviewed_at']))}_"
-            )
+            tag = {"相关": "🟢 相关", "借鉴": "💡 借鉴"}.get(r["decision"], r["decision"])
+            with st.expander(f"{tag} | {r['title']} | {r['source_name']}/{r['column_name']}"):
+                if r.get("publish_date"):
+                    st.caption(f"发布日期：{r['publish_date']}  |  审核时间：{r['reviewed_at']}")
+                st.markdown(_safe_anchor("原文链接", r['url']))
+                if r.get("body_text"):
+                    st.markdown(_md_escape(r["body_text"]))
+                else:
+                    st.info("（无正文内容）")
 
 
 # ----- Tab 3: 常规日历 + 投稿记录 -----
