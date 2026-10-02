@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import re
 
@@ -309,6 +310,40 @@ with tab_check:
 with tab_image:
     st.subheader("📷 图文素材库")
     st.caption("所有带图片的稿件（不限行业），可作图片新闻参考。")
+
+    # ----- 用户上传图片 -----
+    st.markdown("#### 上传本地图片")
+    uploaded = st.file_uploader(
+        "选择图片（支持 jpg/png/jpeg/gif）",
+        type=["jpg", "jpeg", "png", "gif"],
+        accept_multiple_files=True,
+        key="img_uploader",
+    )
+    if uploaded:
+        os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+        saved = []
+        for f in uploaded:
+            ts = _time.strftime("%Y%m%d_%H%M%S")
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', f.name)
+            save_path = os.path.join(config.UPLOAD_DIR, f"{ts}_{safe_name}")
+            with open(save_path, "wb") as buf:
+                buf.write(f.getbuffer())
+            saved.append(save_path)
+        st.success(f"已上传 {len(saved)} 张图片到 data/uploads/")
+
+    # 展示已上传的本地图片
+    if os.path.isdir(config.UPLOAD_DIR):
+        local_imgs = sorted(
+            [os.path.join(config.UPLOAD_DIR, f) for f in os.listdir(config.UPLOAD_DIR)
+             if f.lower().endswith((".jpg", ".jpeg", ".png", ".gif"))],
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        if local_imgs:
+            with st.expander(f"🖼️ 已上传图片（{len(local_imgs)}张）", expanded=False):
+                for p in local_imgs[:20]:
+                    st.image(p, caption=os.path.basename(p), use_container_width=True)
+
     imgs = db.fetch_image_articles(200)
     st.metric("图文稿件", len(imgs))
     for a in imgs:

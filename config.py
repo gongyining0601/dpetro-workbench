@@ -41,6 +41,7 @@ AI_FILTER_ENABLED = os.environ.get("AI_FILTER_ENABLED", "1") == "1"
 # ---------- 兼容老代码的路径字段（云端弃用，保留避免 import 报错） ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 DB_PATH = DATA_DIR  # 仅用于 app.py 侧栏文案展示，不再真实使用
 
 # ---------- 爬虫节流 ----------
@@ -115,7 +116,7 @@ ROUTINE_TOPICS_SEED = [
 
 
 def ensure_dirs():
-    """云端无需本地目录，保留空函数避免破坏依赖（db.init_db / topic_matcher 等仍会调）。"""
-    # 本地调试时若需要 data/ 目录，可取消下面的注释
-    # os.makedirs(DATA_DIR, exist_ok=True)
+    """创建本地目录（图片上传等需要）。"""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     return
