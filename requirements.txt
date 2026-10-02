@@ -24,3 +24,6 @@ python-dotenv>=1.0
 
 # 语义对标：纯 numpy 算 cosine（向量存 Supabase 表，不在内存长驻）
 numpy>=1.26
+
+# 图片上传：验证 + 缩放 + 压缩（图文素材 Tab）
+Pillow>=10.0

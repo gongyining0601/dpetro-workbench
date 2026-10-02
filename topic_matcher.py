@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 # Silicon Flow 不需要 HF 镜像设置（旧版 bge 本地加载才需要），保留无副作用
 # 兼容性：某些子模块若引入 transformers 仍会读这两个变量，设上不报错
@@ -197,29 +198,81 @@ def _fetch_meta_by_ids(ids: list[str]) -> dict[str, dict]:
     }
 
 
+# 锦州石化领域同义词表（小词表，手工维护）——提升向量与关键词检索召回
+_SYNONYMS = {
+    "检修": ["大修", "消缺", "春检", "秋检", "停工检修"],
+    "大修": ["检修", "消缺", "停工检修"],
+    "催化": ["催化裂化", "催化重整", "催化主操"],
+    "加氢": ["加氢裂化", "加氢精制", "渣油加氢"],
+    "环保": ["VOCs", "LDAR", "超低排放", "绿色低碳", "双碳"],
+    "VOCs": ["环保", "LDAR", "挥发性有机物"],
+    "党建": ["党员", "党支部", "主题党日", "红色"],
+    "保供": ["储气", "调峰", "冬保"],
+    "节能": ["降本", "能效", "减排", "能耗"],
+    "技改": ["技术改造", "小改小革", "技措", "改造"],
+    "安全": ["HSE", "隐患", "应急", "演练", "事故"],
+    "数字化": ["智能", "智慧", "信息化", "AI", "智能炼化"],
+    "人才": ["技能", "工匠", "师带徒", "竞赛", "培训"],
+    "创新": ["研发", "专利", "攻关", "QC"],
+    "质量": ["质检", "计量", "化验", "标准"],
+}
+
+
+def _expand_query(keywords: list[str]) -> list[str]:
+    """扩展 query：原词 + 领域同义词（提升向量与关键词检索召回）。"""
+    expanded = list(keywords)
+    kw_str = " ".join(keywords)
+    for kw in keywords:
+        for syn in _SYNONYMS.get(kw, []):
+            if syn not in expanded:
+                expanded.append(syn)
+    # 整串匹配：如"春检"含"检修"语义，补上相关词
+    for root, syns in _SYNONYMS.items():
+        if root in kw_str and root not in expanded:
+            expanded.append(root)
+        for syn in syns:
+            if syn in kw_str and syn not in expanded:
+                expanded.append(syn)
+    return expanded
+
+
+def _calibrate_score(cos_score: float, title_hits: int) -> int:
+    """把 cosine*100（典型 40-85）线性校准到 55-95，加标题命中加权，上限 99。"""
+    calibrated = 55 + (cos_score - 40) * (95 - 55) / max(1, (85 - 40))
+    calibrated = max(0, min(99, calibrated))
+    return min(99, round(calibrated) + title_hits * 4)
+
+
 def _match_vector(keywords: list[str], top_k: int, store: NumpyVectorStore) -> list[dict]:
-    """Silicon Flow 嵌入 + numpy 向量检索。"""
-    query_text = " ".join(keywords)
+    """Silicon Flow 嵌入 + numpy 向量检索 + 重排（标题命中加权 + 分数校准）。"""
+    expanded = _expand_query(keywords)
+    query_text = " ".join(expanded)
     try:
         emb = _embed(query_text)
-        hits = store.query(emb, top_k=top_k)  # [(article_id, score)]
+        # 多取候选便于重排
+        hits = store.query(emb, top_k=max(top_k * 3, top_k))
     except Exception as e:
         print(f"[topic_matcher] 向量查询失败，回退关键词：{e}")
         return _match_keywords(keywords, top_k)
 
     metas = _fetch_meta_by_ids([aid for aid, _ in hits])
+    kw_lower = [k.lower() for k in keywords]
     out: list[dict] = []
-    for aid, score in hits:
+    for aid, cos_score in hits:
         m = metas.get(aid)
         if not m:
             continue
-        out.append({**m, "score": score})
-    return out
+        title_l = (m["title"] or "").lower()
+        title_hits = sum(1 for kw in kw_lower if kw and kw in title_l)
+        final = _calibrate_score(cos_score, title_hits)
+        out.append({**m, "score": final})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:top_k]
 
 
 def _match_keywords(keywords: list[str], top_k: int) -> list[dict]:
     """关键词字符串包含打分（兜底）。一条 JOIN 查出 body_text，避免 N+1 查询。"""
-    kw_lower = [k.lower() for k in keywords]
+    kw_lower = [k.lower() for k in _expand_query(keywords)]
     with db.get_conn() as c:
         cur = db.conn_cursor(c)
         cur.execute(
@@ -261,22 +314,130 @@ def _match_keywords(keywords: list[str], top_k: int) -> list[dict]:
     return scored[:top_k]
 
 
-def angle_advice(keywords: list[str]) -> list[str]:
-    """基于锦州石化常见角度的启发式建议。"""
+def _angle_advice_llm(keywords: list[str], matched: list[dict]) -> list[str] | None:
+    """LLM 生成量身角度建议（智谱→腾讯云回退）。失败返回 None（调用方回退启发式）。"""
+    zp_key = os.getenv("ZHIPU_API_KEY", "")
+    tc_key = os.getenv("TENCENTCLOUD_API_KEY", "")
+    if not (zp_key or tc_key):
+        return None
+
+    topic = " ".join(keywords)
+    refs = "\n".join(
+        f"- {m.get('title', '')}（{m.get('source', '')}/{m.get('column', '')}，{m.get('publish_date') or ''}）"
+        for m in (matched or [])[:5]
+    )
+
+    sys_prompt = (
+        "你是锦州石化公司的资深新闻编辑，熟悉中国石油报、辽宁日报、企业内网的用稿口味。"
+        "用户给出选题关键词和已发相似稿，请给出 3-5 条具体可落地的写作角度建议。"
+        "每条要求：① 切入点具体（装置/人物/节点/数据），② 避免空泛（如'全厂综述'），"
+        "③ 一句话表达。直接列点，不要寒暄、不要编号前缀。"
+    )
+    user_msg = (
+        f"选题：{topic}\n\n"
+        f"相似已发稿参考：\n{refs or '（暂无相似稿，按锦州石化通用思路给）'}\n\n"
+        f"请给 3-5 条写作角度建议。"
+    )
+
+    def _call(base: str, api_key: str, model: str):
+        try:
+            resp = _requests.post(
+                base,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 1024,
+                    "thinking": {"type": "disabled"},
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
+    def _parse(data: dict) -> list[str] | None:
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            return None
+        lines = []
+        for l in content.split("\n"):
+            l = l.strip()
+            if not l:
+                continue
+            l = re.sub(r"^[-*•]\s*", "", l)
+            l = re.sub(r"^\d+[.、)）]\s*", "", l)
+            if l:
+                lines.append(l)
+        return lines[:6] if lines else None
+
+    # 1) 智谱
+    if zp_key:
+        data = _call(config.ZHIPU_CHAT_URL, zp_key, config.ZHIPU_CHAT_MODEL)
+        if data:
+            parsed = _parse(data)
+            if parsed:
+                return parsed
+    # 2) 腾讯云 deepseek
+    if tc_key:
+        data = _call(
+            "https://tokenhub.tencentmaas.com/v1/chat/completions",
+            tc_key,
+            "deepseek-v4-flash-202605",
+        )
+        if data:
+            parsed = _parse(data)
+            if parsed:
+                return parsed
+    return None
+
+
+def _angle_advice_heuristic(keywords: list[str]) -> list[str]:
+    """扩充版启发式角度建议（覆盖 ~15 类锦州石化常见选题）。"""
     advice: list[str] = []
     kw = " ".join(keywords)
-    if "检修" in kw or "春检" in kw:
-        advice.append("角度建议：选一个关键节点（如催化剂装填、压缩机对中）做特写，配'小改小革'人物故事。")
-    if "保供" in kw or "储气" in kw:
-        advice.append("角度建议：从'区域调峰+极端天气应对'切入，引用注采量数据。")
-    if "党建" in kw or "党员" in kw:
-        advice.append("角度建议：避开'会议记录体'，选一个具体岗位（如催化主操）展开。")
-    if "VOCs" in kw or "环保" in kw:
-        advice.append("角度建议：用一组检测数字（LDAR点位整改率、超低排放比例）做骨架。")
+    rules = [
+        (("检修", "春检", "秋检", "大修", "消缺"), "选一个关键节点（催化剂装填、压缩机对中、塔盘更换）做特写，配'小改小革'人物故事。"),
+        (("保供", "储气", "调峰", "冬保"), "从'区域调峰+极端天气应对'切入，引用注采量数据。"),
+        (("党建", "党员", "党支部", "主题党日"), "避开'会议记录体'，选一个具体岗位（如催化主操）展开。"),
+        (("VOCs", "环保", "LDAR", "超低排放"), "用一组检测数字（LDAR点位整改率、超低排放比例）做骨架。"),
+        (("安全", "HSE", "隐患", "应急", "演练"), "挑一次具体隐患整改或应急演练，写'发现-处置-复盘'三段式。"),
+        (("技改", "技术改造", "小改小革", "技措"), "算一笔账：改造投入 vs 节省/增收，用数字说话。"),
+        (("节能", "降本", "能效", "减排", "能耗"), "对比改造前后能耗数据（蒸汽/电/水单耗），写'能效账本'。"),
+        (("数字化", "智能", "智慧", "信息化", "AI"), "聚焦一个智能应用场景（智能巡检、APC先进控制），写前后对比。"),
+        (("人才", "技能", "工匠", "师带徒", "竞赛", "培训"), "选一名技师/工匠，写'岗位成长史'，避免罗列培训人次。"),
+        (("创新", "研发", "专利", "攻关", "QC"), "讲一个攻关小组故事：问题-尝试-突破，配技术指标提升数据。"),
+        (("质量", "质检", "计量", "化验", "标准"), "用一次质量攻关或计量比对做主线，写'精度背后的故事'。"),
+        (("双碳", "绿色", "低碳", "碳"), "用碳减排数据做骨架，写'一吨碳的旅程'或具体降碳项目。"),
+        (("设备", "机泵", "换热器", "压缩机", "阀门"), "选一台关键设备，写它的'健康档案'和守护它的班组。"),
+        (("廉政", "作风", "纪检", "监督"), "用一次具体制度落地或案例，写'制度如何管住风险'。"),
+        (("文化", "宣传", "品牌", "故事"), "找一个老物件/老照片/老传统，写'石化记忆'人文稿。"),
+    ]
+    for triggers, tip in rules:
+        if any(t in kw for t in triggers):
+            advice.append(f"角度建议：{tip}")
     if not advice:
         advice.append("角度建议：先定一个具体装置/具体人，再倒推选题——避免'全厂综述'式空泛。")
     advice.append("避坑提示：辽报忌'企业内部口径'（如'装置一次开车成功'需补背景解释），中石油报可保留行业术语。")
     return advice
+
+
+def angle_advice(keywords: list[str], matched: list[dict] | None = None) -> list[str]:
+    """生成写作角度建议。优先 LLM（智谱→腾讯），失败回退扩充后的启发式。"""
+    matched = matched or []
+    try:
+        llm = _angle_advice_llm(keywords, matched)
+        if llm:
+            return llm
+    except Exception as e:
+        print(f"[topic_matcher] LLM 角度建议失败，回退启发式：{e}")
+    return _angle_advice_heuristic(keywords)
 
 
 if __name__ == "__main__":

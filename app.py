@@ -110,6 +110,12 @@ with st.sidebar:
             st.caption(f"⚠️ 同步警告：{_chroma_stats['error']}")
 
 
+# ---------------- 图文素材上传配置 ----------------
+_UPLOAD_MAX_MB = 10      # 单张上传大小上限
+_UPLOAD_MAX_DIM = 1920  # 超过此边长自动缩放
+_UPLOAD_PAGE_SIZE = 12  # 每页展示数量
+
+
 # ---------------- Tabs ----------------
 tab_review, tab_history, tab_calendar, tab_material, tab_writing, tab_help = st.tabs(
     ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "📚 素材对标", "✍️ 撰稿中心", "❓ 使用说明"]
@@ -279,7 +285,9 @@ with tab_material:
                     )
                     st.caption(_safe_anchor(f"链接（{m['decision']}）", m['url']))
             st.markdown("### 角度建议")
-            for a in topic_matcher.angle_advice(kws):
+            with st.spinner("AI 生成角度建议中…（失败会自动回退到规则建议）"):
+                advice = topic_matcher.angle_advice(kws, matches)
+            for a in advice:
                 st.markdown(f"- {a}")
 
 
@@ -288,27 +296,68 @@ with tab_material:
         st.subheader("📷 图文素材库")
         st.caption("所有带图片的稿件（不限行业），可作图片新闻参考。")
 
-        # ----- 用户上传图片 -----
+        # ----- 用户上传图片（Pillow 验证 + 压缩）-----
         st.markdown("#### 上传本地图片")
+        st.caption(
+            f"支持 jpg/jpeg/png/gif，单张 ≤ {_UPLOAD_MAX_MB}MB；"
+            f"超过 {_UPLOAD_MAX_DIM}px 自动缩小、质量 85%。"
+        )
         uploaded = st.file_uploader(
-            "选择图片（支持 jpg/png/jpeg/gif）",
+            "选择图片",
             type=["jpg", "jpeg", "png", "gif"],
             accept_multiple_files=True,
             key="img_uploader",
         )
         if uploaded:
+            try:
+                from PIL import Image
+            except ImportError:
+                st.error("缺少 Pillow 依赖，请在虚拟环境执行：.venv\\Scripts\\pip install Pillow")
+                st.stop()
             os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-            saved = []
+            saved, errors = [], []
             for f in uploaded:
-                ts = _time.strftime("%Y%m%d_%H%M%S")
-                safe_name = re.sub(r'[\\/:*?"<>|]', '_', f.name)
-                save_path = os.path.join(config.UPLOAD_DIR, f"{ts}_{safe_name}")
-                with open(save_path, "wb") as buf:
-                    buf.write(f.getbuffer())
-                saved.append(save_path)
-            st.success(f"已上传 {len(saved)} 张图片到 data/uploads/")
+                # 大小校验
+                if len(f.getbuffer()) > _UPLOAD_MAX_MB * 1024 * 1024:
+                    errors.append(f"{f.name}：超过 {_UPLOAD_MAX_MB}MB 限制")
+                    continue
+                try:
+                    f.seek(0)
+                    img = Image.open(f)
+                    img.verify()  # 验证是真图片
+                    f.seek(0)
+                    img = Image.open(f)  # verify 后需重开
+                    # 缩放
+                    if max(img.size) > _UPLOAD_MAX_DIM:
+                        img.thumbnail((_UPLOAD_MAX_DIM, _UPLOAD_MAX_DIM))
+                    # 模式归一（保证 JPEG 能存）
+                    if img.mode in ("RGBA", "P", "LA"):
+                        img = img.convert("RGB")
+                    # 落盘
+                    ts = _time.strftime("%Y%m%d_%H%M%S")
+                    safe_name = re.sub(r'[\\/:*?"<>|]', '_', f.name)
+                    save_path = os.path.join(config.UPLOAD_DIR, f"{ts}_{safe_name}")
+                    ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else "jpg"
+                    if ext == "png":
+                        img.save(save_path, "PNG", optimize=True)
+                    else:
+                        # jpg/jpeg/gif 一律存为 JPEG
+                        img.save(save_path, "JPEG", quality=85, optimize=True)
+                    saved.append(save_path)
+                except Exception as e:
+                    errors.append(f"{f.name}：无法识别为图片 ({e})")
+            if saved:
+                st.success(f"已上传 {len(saved)} 张")
+                cols = st.columns(min(len(saved), 4))
+                for i, p in enumerate(saved):
+                    with cols[i % len(cols)]:
+                        st.image(p, caption=os.path.basename(p), use_container_width=True)
+            if errors:
+                st.error("以下文件上传失败：")
+                for e in errors:
+                    st.markdown(f"- {_md_escape(e)}")
 
-        # 展示已上传的本地图片
+        # ----- 已上传图片：筛选 + 分页 + 逐张/批量删除 -----
         if os.path.isdir(config.UPLOAD_DIR):
             local_imgs = sorted(
                 [os.path.join(config.UPLOAD_DIR, f) for f in os.listdir(config.UPLOAD_DIR)
@@ -316,10 +365,94 @@ with tab_material:
                 key=os.path.getmtime,
                 reverse=True,
             )
+            search = st.text_input("🔍 按文件名筛选", key="img_search", placeholder="输入关键字过滤")
+            if search:
+                local_imgs = [p for p in local_imgs if search.lower() in os.path.basename(p).lower()]
             if local_imgs:
-                with st.expander(f"🖼️ 已上传图片（{len(local_imgs)}张）", expanded=False):
-                    for p in local_imgs[:20]:
-                        st.image(p, caption=os.path.basename(p), use_container_width=True)
+                total = len(local_imgs)
+                total_pages = max(1, (total + _UPLOAD_PAGE_SIZE - 1) // _UPLOAD_PAGE_SIZE)
+                page = min(st.session_state.get("img_page", 0), total_pages - 1)
+                start = page * _UPLOAD_PAGE_SIZE
+                page_imgs = local_imgs[start:start + _UPLOAD_PAGE_SIZE]
+                st.caption(f"共 {total} 张 · 第 {page + 1}/{total_pages} 页")
+
+                # 网格：每行 3 张，每张配元数据 + 逐张删 + 多选框
+                sel_keys = []  # [(key, path)] 用于批量删
+                for row_start in range(0, len(page_imgs), 3):
+                    row = page_imgs[row_start:row_start + 3]
+                    cols = st.columns(3)
+                    for j, p in enumerate(row):
+                        i = row_start + j
+                        sel_key = f"sel_{page}_{i}_{os.path.basename(p)}"
+                        sel_keys.append((sel_key, p))
+                        with cols[j]:
+                            st.image(p, use_container_width=True)
+                            st.caption(f"📄 {os.path.basename(p)}")
+                            st.caption(
+                                f"{os.path.getsize(p) // 1024} KB · "
+                                f"{_time.strftime('%m-%d %H:%M', _time.localtime(os.path.getmtime(p)))}"
+                            )
+                            if st.button("🗑 删除", key=f"del_{page}_{i}"):
+                                try:
+                                    os.remove(p)
+                                    st.toast(f"已删除 {os.path.basename(p)}", icon="🗑")
+                                except Exception as e:
+                                    st.error(f"删除失败：{e}")
+                                st.rerun()
+                            st.checkbox("选中", key=sel_key)
+
+                # 批量删除条
+                st.divider()
+                n_sel = sum(1 for k, _ in sel_keys if st.session_state.get(k, False))
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    bulk_label = f"🗑 删除选中({n_sel})" if n_sel else "🗑 删除选中"
+                    if st.button(bulk_label, key="bulk_del", disabled=(n_sel == 0)):
+                        st.session_state["_bulk_confirm"] = True
+                        st.rerun()
+                with bc2:
+                    if st.button("清空本页选择", key="sel_clear"):
+                        for k, _ in sel_keys:
+                            st.session_state[k] = False
+                        st.session_state["_bulk_confirm"] = False
+                        st.rerun()
+
+                # 批量删除二次确认
+                if st.session_state.get("_bulk_confirm", False):
+                    st.warning(f"⚠️ 确认删除本页选中的 {n_sel} 张？此操作不可撤销。")
+                    kc1, kc2 = st.columns(2)
+                    with kc1:
+                        if st.button("✅ 确认删除", key="bulk_yes", type="primary"):
+                            for k, p in sel_keys:
+                                if st.session_state.get(k, False) and os.path.exists(p):
+                                    try:
+                                        os.remove(p)
+                                    except Exception:
+                                        pass
+                            for k, _ in sel_keys:
+                                st.session_state[k] = False
+                            st.session_state["_bulk_confirm"] = False
+                            st.toast("批量删除完成", icon="🗑")
+                            st.rerun()
+                    with kc2:
+                        if st.button("取消", key="bulk_no"):
+                            st.session_state["_bulk_confirm"] = False
+                            st.rerun()
+
+                # 分页按钮
+                pc1, pc2, pc3 = st.columns([1, 2, 1])
+                with pc1:
+                    if st.button("⬅ 上一页", key="pg_prev", disabled=(page == 0)):
+                        st.session_state["img_page"] = page - 1
+                        st.rerun()
+                with pc2:
+                    st.caption(f"第 {page + 1} / {total_pages} 页")
+                with pc3:
+                    if st.button("下一页 ➡", key="pg_next", disabled=(page >= total_pages - 1)):
+                        st.session_state["img_page"] = page + 1
+                        st.rerun()
+            else:
+                st.info("暂无已上传图片。先在上面上传几张试试。")
 
         imgs = db.fetch_image_articles(200)
         st.metric("图文稿件", len(imgs))
@@ -395,13 +528,40 @@ with tab_writing:
                 with st.spinner("AI 校对中..."):
                     ai_r = draft_checker.ai_proofread(title or "", text or "", caption or "")
                 st.markdown("### 🤖 AI 深度校对")
-                for i in ai_r.get("ai_issues", []):
-                    st.markdown(f"- {_md_escape(i)}")
+                _ai_issues = ai_r.get("ai_issues", [])
+                if ai_r.get("ok"):
+                    if isinstance(_ai_issues, dict):
+                        if not any(_ai_issues.values()):
+                            st.success("AI 校对未发现问题")
+                        for _cat, _items in _ai_issues.items():
+                            if _items:
+                                with st.expander(f"{_cat} ({len(_items)})", expanded=False):
+                                    for _i in _items:
+                                        st.markdown(f"- {_md_escape(_i)}")
+                    else:
+                        for _i in _ai_issues:
+                            st.markdown(f"- {_md_escape(_i)}")
+                else:
+                    for _i in (_ai_issues if isinstance(_ai_issues, list) else [_ai_issues]):
+                        st.error(_md_escape(str(_i)))
             st.markdown("### 🧭 三版适配")
-            for ver, advice in result["versions"].items():
-                with st.expander(ver, expanded=True):
-                    for a in advice:
-                        st.markdown(f"- {_md_escape(a)}")
+            ver_data: dict = {}
+            if "深度" in mode:
+                for _ver in ["辽报版", "中石油版", "企业内网版"]:
+                    with st.spinner(f"{_ver} AI 量身适配中..."):
+                        ver_data[_ver] = draft_checker.version_advice(
+                            title or "", text or "", caption or "", _ver
+                        )
+            else:
+                for _ver, _adv in result["versions"].items():
+                    ver_data[_ver] = {"advice": _adv, "lead_example": "", "source": "heuristic"}
+            for _ver, _d in ver_data.items():
+                with st.expander(f"{_ver} · {_d.get('source', 'heuristic')}", expanded=False):
+                    for _a in _d.get("advice", []):
+                        st.markdown(f"- {_md_escape(_a)}")
+                    if _d.get("lead_example"):
+                        st.markdown("**改写后导语示例：**")
+                        st.info(_d["lead_example"])
         elif not (title or text):
             st.info("先填标题或正文，再点体检。")
 
