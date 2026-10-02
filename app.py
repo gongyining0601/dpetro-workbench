@@ -3,12 +3,13 @@
 启动：
     streamlit run app.py
 
-5 个 Tab：
+6 个 Tab：
 1. 今日审核   —— 5 分钟审核新稿（相关 / 无关 / 借鉴）
 2. 历史已审   —— 看过去审核结果，复盘
 3. 常规日历   —— 未来两周常规选题预警 + 命中率
-4. 选题对标   —— 输入关键词，对标相似已发稿 + 角度建议
-5. 成稿体检   —— 草稿质量检查 + 三版适配
+4. 素材对标   —— 选题对标（语义检索）+ 图文素材库
+5. 撰稿中心   —— 行者撰稿（AI写稿）+ 成稿体检（质量检查）
+6. 使用说明   —— 操作指南
 
 投稿记录功能在第 3 个 tab 同屏管理（与命中率一起看）。
 """
@@ -109,8 +110,8 @@ with st.sidebar:
 
 
 # ---------------- Tabs ----------------
-tab_review, tab_history, tab_calendar, tab_match, tab_check, tab_image, tab_writer, tab_help = st.tabs(
-    ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "🎯 选题对标", "📝 成稿体检", "📷 图文素材", "✍️ 行者撰稿", "❓ 使用说明"]
+tab_review, tab_history, tab_calendar, tab_material, tab_writing, tab_help = st.tabs(
+    ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "📚 素材对标", "✍️ 撰稿中心", "❓ 使用说明"]
 )
 
 
@@ -254,149 +255,157 @@ with tab_calendar:
                 st.error(f"保存失败：{e}")
 
 
-# ----- Tab 4: 选题对标 -----
-with tab_match:
-    st.subheader("选题对标器（语义检索）")
-    st.caption("用大白话描述你的选题即可（不用精确命中标题词），AI 按语义找最接近的已发稿。只在你标过「相关/借鉴」的稿件里检索。")
-    kw_str = st.text_input("你的选题/素材", placeholder="如：春季装置检修里一名催化主操的故事")
-    if kw_str:
-        kws = [k.strip() for k in kw_str.replace("，", " ").split() if k.strip()]
-        matches = topic_matcher.match(kws, top_k=5)
-        if not matches:
-            st.warning("没找到相似稿件——审核台多审几篇，库里有了再回来。")
-        else:
-            st.markdown("### 相似已发稿")
-            for m in matches:
-                st.markdown(
-                    f"- **{_md_escape(m['title'])}** "
-                    f"`{_md_escape(m['source'])}/{_md_escape(m['column'])}` "
-                    f"_{_md_escape(str(m['publish_date'] or ''))}_ "
-                    f"[相关度 {m['score']}]"
-                )
-                st.caption(_safe_anchor(f"链接（{m['decision']}）", m['url']))
-        st.markdown("### 角度建议")
-        for a in topic_matcher.angle_advice(kws):
-            st.markdown(f"- {a}")
-
-
-# ----- Tab 5: 成稿体检 -----
-with tab_check:
-    st.subheader("📝 成稿体检器")
-    st.caption("投稿前自检：模糊时间 / 空泛数据 / 绝对化用词 / 图片说明质量。")
-    title = st.text_input("稿件标题")
-    text = st.text_area("稿件正文", height=220)
-    caption = st.text_input("图片说明", placeholder="如：图为催化主操张三在调整反应温度")
-    mode = st.radio("校对模式", ["快速模式（仅规则）", "深度模式（规则+AI校对）"], horizontal=True)
-    if st.button("开始体检", type="primary") and (title or text):
-        result = draft_checker.check(title or "", text or "", caption or "")
-        st.markdown("### 🐛 问题清单")
-        for i in result["issues"]:
-            st.markdown(f"- {_md_escape(i)}")
-        if "深度" in mode:
-            with st.spinner("AI 校对中..."):
-                ai_r = draft_checker.ai_proofread(title or "", text or "", caption or "")
-            st.markdown("### 🤖 AI 深度校对")
-            for i in ai_r.get("ai_issues", []):
-                st.markdown(f"- {_md_escape(i)}")
-        st.markdown("### 🧭 三版适配")
-        for ver, advice in result["versions"].items():
-            with st.expander(ver, expanded=True):
-                for a in advice:
-                    st.markdown(f"- {_md_escape(a)}")
-    elif not (title or text):
-        st.info("先填标题或正文，再点体检。")
-
-# ----- Tab 6: 图文素材 -----
-with tab_image:
-    st.subheader("📷 图文素材库")
-    st.caption("所有带图片的稿件（不限行业），可作图片新闻参考。")
-
-    # ----- 用户上传图片 -----
-    st.markdown("#### 上传本地图片")
-    uploaded = st.file_uploader(
-        "选择图片（支持 jpg/png/jpeg/gif）",
-        type=["jpg", "jpeg", "png", "gif"],
-        accept_multiple_files=True,
-        key="img_uploader",
-    )
-    if uploaded:
-        os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-        saved = []
-        for f in uploaded:
-            ts = _time.strftime("%Y%m%d_%H%M%S")
-            safe_name = re.sub(r'[\\/:*?"<>|]', '_', f.name)
-            save_path = os.path.join(config.UPLOAD_DIR, f"{ts}_{safe_name}")
-            with open(save_path, "wb") as buf:
-                buf.write(f.getbuffer())
-            saved.append(save_path)
-        st.success(f"已上传 {len(saved)} 张图片到 data/uploads/")
-
-    # 展示已上传的本地图片
-    if os.path.isdir(config.UPLOAD_DIR):
-        local_imgs = sorted(
-            [os.path.join(config.UPLOAD_DIR, f) for f in os.listdir(config.UPLOAD_DIR)
-             if f.lower().endswith((".jpg", ".jpeg", ".png", ".gif"))],
-            key=os.path.getmtime,
-            reverse=True,
-        )
-        if local_imgs:
-            with st.expander(f"🖼️ 已上传图片（{len(local_imgs)}张）", expanded=False):
-                for p in local_imgs[:20]:
-                    st.image(p, caption=os.path.basename(p), use_container_width=True)
-
-    imgs = db.fetch_image_articles(200)
-    st.metric("图文稿件", len(imgs))
-    for a in imgs:
-        with st.expander(f"[{a['source_name']}/{a['column_name']}] {a['title']}", expanded=False):
-            st.caption(f"{a['publish_date'] or ''}")
-            # 展示图片
-            img_urls_raw = a.get("image_urls")
-            if img_urls_raw:
-                try:
-                    img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
-                    if img_urls:
-                        for u in img_urls[:5]:
-                            try:
-                                st.image(u, use_container_width=True)
-                            except Exception:
-                                st.markdown(f"![图片]({u})")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            if a.get("summary"):
-                st.markdown(_md_escape(a["summary"]))
-            if a.get("body_text"):
-                st.markdown(_md_escape(a["body_text"][:1000]))
-            if a.get("url"):
-                st.markdown(f"[原文链接]({_safe_anchor(a['url'])})")
-
-# ----- Tab 7: 行者撰稿（AI辅助写稿） -----
-with tab_writer:
-    st.subheader("✍️ 行者撰稿")
-    st.caption("AI 辅助生成新闻稿初稿（使用免费模型 GLM-4-9B-Chat）。")
-    with st.form("writer_form"):
-        topic = st.text_input("选题关键词*", placeholder="如：春检、安全月、冬季保供")
-        col1, col2 = st.columns(2)
-        with col1:
-            angle = st.text_input("写作角度（可选）", placeholder="如：人物故事、数据对比")
-            target = st.selectbox("目标媒体", ["中国石油报", "辽宁日报", "企业内网"])
-        with col2:
-            word_count = st.slider("目标字数", 300, 2000, 800, 100)
-        facts = st.text_area("已知事实/数据（可选）", placeholder="如：处理量同比+15%，创历史新高")
-        submitted = st.form_submit_button("生成初稿", type="primary")
-    if submitted:
-        if not topic.strip():
-            st.warning("请输入选题关键词")
-        else:
-            with st.spinner("AI 正在撰写..."):
-                r = ai_writer.write_article(topic, angle, word_count, target, facts)
-            if r["ok"]:
-                if r["title"]:
-                    st.text_input("标题", value=r["title"])
-                st.text_area("初稿", value=r["body"], height=400)
-                st.success("生成完成，可复制后自行修改。")
+# ----- Tab 4: 素材对标（选题对标 + 图文素材）-----
+with tab_material:
+    sub_match, sub_image = st.tabs(["🎯 选题对标", "📷 图文素材"])
+    with sub_match:
+        st.subheader("选题对标器（语义检索）")
+        st.caption("用大白话描述你的选题即可（不用精确命中标题词），AI 按语义找最接近的已发稿。只在你标过「相关/借鉴」的稿件里检索。")
+        kw_str = st.text_input("你的选题/素材", placeholder="如：春季装置检修里一名催化主操的故事")
+        if kw_str:
+            kws = [k.strip() for k in kw_str.replace("，", " ").split() if k.strip()]
+            matches = topic_matcher.match(kws, top_k=5)
+            if not matches:
+                st.warning("没找到相似稿件——审核台多审几篇，库里有了再回来。")
             else:
-                st.error(f"生成失败：{r['error']}")
-# ----- Tab 8: 使用说明 -----
+                st.markdown("### 相似已发稿")
+                for m in matches:
+                    st.markdown(
+                        f"- **{_md_escape(m['title'])}** "
+                        f"`{_md_escape(m['source'])}/{_md_escape(m['column'])}` "
+                        f"_{_md_escape(str(m['publish_date'] or ''))}_ "
+                        f"[相关度 {m['score']}]"
+                    )
+                    st.caption(_safe_anchor(f"链接（{m['decision']}）", m['url']))
+            st.markdown("### 角度建议")
+            for a in topic_matcher.angle_advice(kws):
+                st.markdown(f"- {a}")
+
+
+    
+    with sub_image:
+        st.subheader("📷 图文素材库")
+        st.caption("所有带图片的稿件（不限行业），可作图片新闻参考。")
+
+        # ----- 用户上传图片 -----
+        st.markdown("#### 上传本地图片")
+        uploaded = st.file_uploader(
+            "选择图片（支持 jpg/png/jpeg/gif）",
+            type=["jpg", "jpeg", "png", "gif"],
+            accept_multiple_files=True,
+            key="img_uploader",
+        )
+        if uploaded:
+            os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+            saved = []
+            for f in uploaded:
+                ts = _time.strftime("%Y%m%d_%H%M%S")
+                safe_name = re.sub(r'[\\/:*?"<>|]', '_', f.name)
+                save_path = os.path.join(config.UPLOAD_DIR, f"{ts}_{safe_name}")
+                with open(save_path, "wb") as buf:
+                    buf.write(f.getbuffer())
+                saved.append(save_path)
+            st.success(f"已上传 {len(saved)} 张图片到 data/uploads/")
+
+        # 展示已上传的本地图片
+        if os.path.isdir(config.UPLOAD_DIR):
+            local_imgs = sorted(
+                [os.path.join(config.UPLOAD_DIR, f) for f in os.listdir(config.UPLOAD_DIR)
+                 if f.lower().endswith((".jpg", ".jpeg", ".png", ".gif"))],
+                key=os.path.getmtime,
+                reverse=True,
+            )
+            if local_imgs:
+                with st.expander(f"🖼️ 已上传图片（{len(local_imgs)}张）", expanded=False):
+                    for p in local_imgs[:20]:
+                        st.image(p, caption=os.path.basename(p), use_container_width=True)
+
+        imgs = db.fetch_image_articles(200)
+        st.metric("图文稿件", len(imgs))
+        for a in imgs:
+            with st.expander(f"[{a['source_name']}/{a['column_name']}] {a['title']}", expanded=False):
+                st.caption(f"{a['publish_date'] or ''}")
+                # 展示图片
+                img_urls_raw = a.get("image_urls")
+                if img_urls_raw:
+                    try:
+                        img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
+                        if img_urls:
+                            for u in img_urls[:5]:
+                                try:
+                                    st.image(u, use_container_width=True)
+                                except Exception:
+                                    st.markdown(f"![图片]({u})")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if a.get("summary"):
+                    st.markdown(_md_escape(a["summary"]))
+                if a.get("body_text"):
+                    st.markdown(_md_escape(a["body_text"][:1000]))
+                if a.get("url"):
+                    st.markdown(f"[原文链接]({_safe_anchor(a['url'])})")
+
+    
+
+# ----- Tab 5: 撰稿中心（行者撰稿 + 成稿体检）-----
+with tab_writing:
+    sub_writer, sub_check = st.tabs(["✍️ 行者撰稿", "📝 成稿体检"])
+    with sub_writer:
+        st.subheader("✍️ 行者撰稿")
+        st.caption("AI 辅助生成新闻稿初稿（使用免费模型 GLM-4-9B-Chat）。")
+        with st.form("writer_form"):
+            topic = st.text_input("选题关键词*", placeholder="如：春检、安全月、冬季保供")
+            col1, col2 = st.columns(2)
+            with col1:
+                angle = st.text_input("写作角度（可选）", placeholder="如：人物故事、数据对比")
+                target = st.selectbox("目标媒体", ["中国石油报", "辽宁日报", "企业内网"])
+            with col2:
+                word_count = st.slider("目标字数", 300, 2000, 800, 100)
+            facts = st.text_area("已知事实/数据（可选）", placeholder="如：处理量同比+15%，创历史新高")
+            submitted = st.form_submit_button("生成初稿", type="primary")
+        if submitted:
+            if not topic.strip():
+                st.warning("请输入选题关键词")
+            else:
+                with st.spinner("AI 正在撰写..."):
+                    r = ai_writer.write_article(topic, angle, word_count, target, facts)
+                if r["ok"]:
+                    if r["title"]:
+                        st.text_input("标题", value=r["title"])
+                    st.text_area("初稿", value=r["body"], height=400)
+                    st.success("生成完成，可复制后自行修改。")
+                else:
+                    st.error(f"生成失败：{r['error']}")
+    # ----- Tab 8: 使用说明 -----
+
+    with sub_check:
+        st.subheader("📝 成稿体检器")
+        st.caption("投稿前自检：模糊时间 / 空泛数据 / 绝对化用词 / 图片说明质量。")
+        title = st.text_input("稿件标题")
+        text = st.text_area("稿件正文", height=220)
+        caption = st.text_input("图片说明", placeholder="如：图为催化主操张三在调整反应温度")
+        mode = st.radio("校对模式", ["快速模式（仅规则）", "深度模式（规则+AI校对）"], horizontal=True)
+        if st.button("开始体检", type="primary") and (title or text):
+            result = draft_checker.check(title or "", text or "", caption or "")
+            st.markdown("### 🐛 问题清单")
+            for i in result["issues"]:
+                st.markdown(f"- {_md_escape(i)}")
+            if "深度" in mode:
+                with st.spinner("AI 校对中..."):
+                    ai_r = draft_checker.ai_proofread(title or "", text or "", caption or "")
+                st.markdown("### 🤖 AI 深度校对")
+                for i in ai_r.get("ai_issues", []):
+                    st.markdown(f"- {_md_escape(i)}")
+            st.markdown("### 🧭 三版适配")
+            for ver, advice in result["versions"].items():
+                with st.expander(ver, expanded=True):
+                    for a in advice:
+                        st.markdown(f"- {_md_escape(a)}")
+        elif not (title or text):
+            st.info("先填标题或正文，再点体检。")
+
+    
+
 with tab_help:
     st.subheader("🧭 行者 · 使用说明")
 
