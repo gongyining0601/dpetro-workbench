@@ -24,6 +24,14 @@ load_dotenv()
 # 格式：postgresql://postgres.<ref>:<password>@aws-<region>.pooler.supabase.com:6543/postgres
 DB_DSN = os.environ.get("DATABASE_URL", "")
 
+# ---------- 智谱 Zhipu 免费 LLM (chat) API ----------
+# 2026-10-02 新增：写稿与 AI 初选默认改走智谱 GLM 免费模型（OpenAI 兼容接口）。
+# 注册 https://bigmodel.cn 后在「API 密钥」新建，免费模型永久可用。
+# 模型名：优先 GLM-4.7-Flash；如已下线/变更，以智谱官方「免费模型」列表为准（改 ZHIPU_CHAT_MODEL 即可）。
+ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
+ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+ZHIPU_CHAT_MODEL = os.environ.get("ZHIPU_CHAT_MODEL", "GLM-4.7-Flash")
+
 # ---------- Silicon Flow 免费 embedding API ----------
 # 注册 https://siliconflow.cn 后在「账号 → API 密钥」新建，免费送 14 元 ≈ 1.5 亿次嵌入调用
 SF_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
@@ -31,7 +39,7 @@ SF_EMBED_URL = "https://api.siliconflow.cn/v1/embeddings"
 SF_EMBED_MODEL = "BAAI/bge-large-zh-v1.5"  # 升级到 large，比本地 base 更准
 SF_EMBED_DIM = 1024  # bge-large-zh-v1.5 输出维度（base 是 768）
 
-# ---------- Silicon Flow 免费 LLM (chat) API ----------
+# ---------- Silicon Flow 免费 LLM (chat) API（保留作智谱失败时的后备） ----------
 # 复用同一个 SF_API_KEY；chat 用于 AI 初选（爬虫入库前判断相关性，过滤无关稿）
 SF_CHAT_URL = "https://api.siliconflow.cn/v1/chat/completions"
 SF_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 免费，中文表现好，判断相关性够用

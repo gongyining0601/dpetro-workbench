@@ -157,6 +157,22 @@ python -B crawler.py
 - 时间一律存 ISO 字符串
 - 数据库密码 / API Key 全走环境变量 / Secrets，不进代码、不进 git
 
+## AI 服务商切换说明（2026-10-02）
+
+写稿（`ai_writer.py`）与 AI 初选过滤（`ai_filter.py`）默认使用**智谱 GLM 免费模型**，原服务商保留为后备，失败时自动回退，功能不中断。
+
+| 环境变量 | 含义 |
+|---------|------|
+| `ZHIPU_API_KEY` | 智谱 Key（注册 https://bigmodel.cn → API 密钥）|
+| `ZHIPU_CHAT_MODEL` | 智谱免费模型名，默认 `GLM-4.7-Flash`（以官方免费模型列表为准）|
+
+- **写稿**：优先智谱 GLM，失败/未配 Key 时回退腾讯云 `TENCENTCLOUD_API_KEY`（deepseek）。
+- **AI 初选**：优先智谱 GLM，失败/未配 Key 时回退硅基流动 `SILICONFLOW_API_KEY`（Qwen）。
+- **不配置 `ZHIPU_API_KEY` 时**：两个模块自动走原服务商，完全不影响原有功能。
+- 免费模型名若变更：改 `config.py` 的 `ZHIPU_CHAT_MODEL`（或环境变量）即可，无需动代码逻辑。
+
+> 注意：智谱免费模型高峰时可能出现 429「访问量过大」限流，代码已自动回退原服务商兜底。
+
 ## 设计约定
 
 - 全部云端运行，不接任何付费 API（仅 Silicon Flow 免费额度）
