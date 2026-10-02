@@ -53,6 +53,7 @@ _db_ok = False
 for _attempt in range(2):  # 自动重试1次（连接池可能刚重建）
     try:
         db.init_db()
+        db.cleanup_old_unreviewed()  # 清理90天前未审核稿件
         _db_ok = True
         break
     except Exception as e:

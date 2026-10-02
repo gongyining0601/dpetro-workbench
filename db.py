@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, timedelta
 
 import psycopg2
 import psycopg2.extras
@@ -396,3 +396,24 @@ def stats_overview():
 if __name__ == "__main__":
     init_db()
     print("DB 初始化完成（Supabase PostgreSQL）")
+
+
+def cleanup_old_unreviewed(days: int = 90) -> int:
+    """清理超过指定天数的未审核稿件，防止数据库无限增长。
+
+    仅删除 status='待审' 且 publish_date < now-days 的稿件，
+    同时清理其嵌入向量和审核记录。返回删除数量。
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+    deleted = 0
+    with conn_cursor() as cur:
+        cur.execute("SELECT id FROM article WHERE status = '待审' AND publish_date < %s", (cutoff,))
+        ids = [r[0] for r in cur.fetchall()]
+        for aid in ids:
+            cur.execute("DELETE FROM article_embedding WHERE article_id = %s", (aid,))
+            cur.execute("DELETE FROM review_record WHERE article_id = %s", (aid,))
+            cur.execute("DELETE FROM article WHERE id = %s", (aid,))
+            deleted += 1
+    if deleted:
+        config.logger.info(f"清理 {deleted} 条超过 {days} 天的未审核稿件")
+    return deleted

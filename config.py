@@ -44,6 +44,31 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 DB_PATH = DATA_DIR  # 仅用于 app.py 侧栏文案展示，不再真实使用
 
+# ---------- 持久化日志 ----------
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+def setup_logging():
+    """配置持久化日志：控制台 + 文件（按天滚动，保留30天）"""
+    log_dir = os.path.join(DATA_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "app.log")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # 避免重复添加文件 handler
+    has_file = any(isinstance(h, TimedRotatingFileHandler) for h in root.handlers)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    if not has_file:
+        fh = TimedRotatingFileHandler(log_file, when="D", interval=1, backupCount=30, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    root.addHandler(ch)
+
+setup_logging()
+logger = logging.getLogger("dpetro")
+
 # ---------- 爬虫节流 ----------
 CRAWL_INTERVAL_SECONDS = 5  # 同一站点内两次请求之间的最小间隔
 CRAWL_MAX_PER_COLUMN = 20  # 每个栏目最多抓多少条新稿（一次运行）

@@ -5,6 +5,9 @@ MVP 实现：基于正则的轻量规则，零依赖、零外部 API。
 from __future__ import annotations
 
 import re
+import json
+import os
+import requests as _requests
 
 
 def _extract_json_array(text: str) -> list | None:
@@ -120,7 +123,7 @@ def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
     user_msg += "\n请以 JSON 数组格式返回问题列表，每个元素是一个问题描述字符串。如无问题返回空数组 []。"
 
     try:
-        resp = _requests.post(
+        resp = requests.post(
             _TC_BASE,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
