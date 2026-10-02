@@ -98,6 +98,7 @@ def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
                 ],
                 "temperature": 0.3,
                 "max_tokens": 1024,
+                "thinking": {"type": "disabled"},
             },
             timeout=60,
         )
