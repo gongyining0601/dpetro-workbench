@@ -282,7 +282,7 @@ def fetch_unreviewed(limit: int = 50):
             "LEFT JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
             "LEFT JOIN media_source s ON s.id = c.source_id "
-            "WHERE r.id IS NULL AND a.has_image = FALSE ORDER BY a.crawled_at DESC LIMIT %s", (limit,)
+            "WHERE r.id IS NULL ORDER BY a.crawled_at DESC LIMIT %s", (limit,)
         )
         return cur.fetchall()
 

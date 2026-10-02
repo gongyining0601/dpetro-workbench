@@ -16,8 +16,32 @@ _MODEL = "deepseek-v4-flash-202605"
 
 
 def _extract_json(text: str) -> str | None:
-    m = re.search(r"\{.*\}", text, re.S)
-    return m.group(0) if m else None
+    """用括号配对栈提取首个完整 JSON 对象，避免贪婪正则误匹配。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
 
 
 def write_article(topic: str, angle: str = "", word_count: int = 800,

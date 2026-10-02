@@ -6,6 +6,39 @@ from __future__ import annotations
 
 import re
 
+
+def _extract_json_array(text: str) -> list | None:
+    """用括号配对栈提取首个完整 JSON 数组，避免贪婪正则误匹配。"""
+    start = text.find("[")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                import json
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
 # 模糊时间表达：不含具体日期/月份
 FUZZY_TIME = re.compile(r"(最近|近日|日前|前不久|前段|不久前|这些天|这阵子|近期)")
 # 空泛数据：缺少具体数字的「大幅/显著/稳步」等
@@ -104,11 +137,8 @@ def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
-        import re as _re
-        m = _re.search(r"\[.*\]", content, _re.S)
-        if m:
-            import json as _json
-            issues = _json.loads(m.group(0))
+        issues = _extract_json_array(content)
+        if issues is not None:
             return {"ai_issues": issues if issues else ["AI 校对未发现问题"], "ok": True}
         return {"ai_issues": [content] if content else ["AI 校对未发现问题"], "ok": True}
     except Exception as e:
