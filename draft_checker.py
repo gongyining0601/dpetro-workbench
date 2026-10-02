@@ -61,15 +61,15 @@ def check(draft_title: str, draft_text: str, caption: str = "") -> dict:
 import os
 import requests as _requests
 
-_SF_BASE = "https://api.siliconflow.cn/v1/chat/completions"
-_MODEL_PROOFREAD = "THUDM/glm-4-9b-chat"
+_TC_BASE = "https://tokenhub.tencentmaas.com/v1/chat/completions"
+_MODEL_PROOFREAD = "deepseek-v4-flash-202605"
 
 
 def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
     """AI 深度校对：错别字、标点、语病、新闻规范、数字单位、敏感表述。"""
-    api_key = os.getenv("SILICONFLOW_API_KEY", "")
+    api_key = os.getenv("TENCENTCLOUD_API_KEY", "")
     if not api_key:
-        return {"ai_issues": ["未配置 SILICONFLOW_API_KEY，跳过 AI 校对"], "ok": False}
+        return {"ai_issues": ["未配置 TENCENTCLOUD_API_KEY，跳过 AI 校对"], "ok": False}
 
     sys_prompt = (
         "你是一位资深新闻出版校对编辑。请对稿件进行校对，找出以下问题："
@@ -88,7 +88,7 @@ def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
 
     try:
         resp = _requests.post(
-            _SF_BASE,
+            _TC_BASE,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": _MODEL_PROOFREAD,

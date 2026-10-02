@@ -1,7 +1,7 @@
-﻿"""AI 辅助写稿模块。
+"""AI 辅助写稿模块。
 
-使用 Silicon Flow 的 THUDM/glm-4-9b-chat（免费模型）生成新闻稿初稿。
-复用现有 SILICONFLOW_API_KEY，零额外成本。
+使用 Silicon Flow 的 deepseek-chat（免费模型）生成新闻稿初稿。
+复用现有 TENCENTCLOUD_API_KEY，零额外成本。
 """
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import re
 
 import requests
 
-_SF_BASE = "https://api.siliconflow.cn/v1/chat/completions"
-_MODEL = "THUDM/glm-4-9b-chat"
+_TC_BASE = "https://tokenhub.tencentmaas.com/v1/chat/completions"
+_MODEL = "deepseek-v4-flash-202605"
 
 
 def _extract_json(text: str) -> str | None:
@@ -23,9 +23,9 @@ def _extract_json(text: str) -> str | None:
 def write_article(topic: str, angle: str = "", word_count: int = 800,
                   target_media: str = "中国石油报", facts: str = "") -> dict:
     """AI 生成新闻稿初稿。"""
-    api_key = os.getenv("SILICONFLOW_API_KEY", "")
+    api_key = os.getenv("TENCENTCLOUD_API_KEY", "")
     if not api_key:
-        return {"title": "", "body": "", "ok": False, "error": "未配置 SILICONFLOW_API_KEY"}
+        return {"title": "", "body": "", "ok": False, "error": "未配置 TENCENTCLOUD_API_KEY"}
 
     sys_prompt = (
         "你是一位资深的中国新闻记者，擅长撰写石油石化行业新闻稿。"
@@ -42,7 +42,7 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
 
     try:
         resp = requests.post(
-            _SF_BASE,
+            _TC_BASE,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": _MODEL,
@@ -52,6 +52,7 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
                 ],
                 "temperature": 0.7,
                 "max_tokens": word_count * 2,
+                "thinking": {"type": "disabled"},
             },
             timeout=60,
         )
