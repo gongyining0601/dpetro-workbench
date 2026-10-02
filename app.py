@@ -1,4 +1,4 @@
-﻿"""Streamlit 审核台主入口。
+"""Streamlit 审核台主入口。
 
 启动：
     streamlit run app.py
@@ -13,6 +13,8 @@
 投稿记录功能在第 3 个 tab 同屏管理（与命中率一起看）。
 """
 from __future__ import annotations
+
+import json
 
 import re
 
@@ -312,6 +314,19 @@ with tab_image:
     for a in imgs:
         with st.expander(f"[{a['source_name']}/{a['column_name']}] {a['title']}", expanded=False):
             st.caption(f"{a['publish_date'] or ''}")
+            # 展示图片
+            img_urls_raw = a.get("image_urls")
+            if img_urls_raw:
+                try:
+                    img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
+                    if img_urls:
+                        for u in img_urls[:5]:
+                            try:
+                                st.image(u, use_container_width=True)
+                            except Exception:
+                                st.markdown(f"![图片]({u})")
+                except (json.JSONDecodeError, TypeError):
+                    pass
             if a.get("summary"):
                 st.markdown(_md_escape(a["summary"]))
             if a.get("body_text"):

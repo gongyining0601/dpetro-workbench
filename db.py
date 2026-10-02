@@ -212,6 +212,9 @@ def init_db() -> None:
     with get_conn() as c:
         cur = conn_cursor(c)
         cur.execute(SCHEMA)
+        # 增量字段迁移（已有表）
+        cur.execute("ALTER TABLE article ADD COLUMN IF NOT EXISTS has_image BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE article ADD COLUMN IF NOT EXISTS image_urls TEXT")
         # 灌媒体源 + 栏目
         for src in config.MEDIA_SOURCES:
             cur.execute(
@@ -253,17 +256,18 @@ def init_db() -> None:
 
 def upsert_article(column_id: int, *, title: str, url: str, author: str | None,
                    publish_date: str | None, summary: str | None,
-                   body_text: str | None, content_hash: str | None) -> bool:
+                   body_text: str | None, content_hash: str | None,
+                   has_image: bool = False, image_urls: str | None = None) -> bool:
     """插入新文章；URL 唯一约束命中则跳过。返回是否新增。"""
     with get_conn() as c:
         cur = conn_cursor(c)
         cur.execute(
             "INSERT INTO article"
             "(column_id, title, url, author, publish_date, summary, body_text,"
-            " content_hash, crawled_at, has_image) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            " content_hash, crawled_at, has_image, image_urls) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (url) DO NOTHING",
             (column_id, title, url, author, publish_date, summary,
-             body_text, content_hash, now_iso(), has_image),
+             body_text, content_hash, now_iso(), has_image, image_urls),
         )
         return cur.rowcount > 0
 
@@ -290,7 +294,8 @@ def fetch_image_articles(limit: int = 200):
         cur = conn_cursor(c)
         cur.execute(
             "SELECT a.id, a.title, a.url, a.author, a.publish_date, a.summary, "
-            "LEFT(a.body_text, 500) AS body_text, a.crawled_at, c.name AS column_name, s.name AS source_name "
+            "LEFT(a.body_text, 500) AS body_text, a.crawled_at, a.image_urls, "
+            "c.name AS column_name, s.name AS source_name "
             "FROM article a "
             "LEFT JOIN media_column c ON c.id = a.column_id "
             "LEFT JOIN media_source s ON s.id = c.source_id "

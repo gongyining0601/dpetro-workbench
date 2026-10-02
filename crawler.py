@@ -1,4 +1,4 @@
-﻿"""礼貌爬虫：robots.txt 检查 + 节流 + 列表页/详情页解析。
+"""礼貌爬虫：robots.txt 检查 + 节流 + 列表页/详情页解析。
 
 架构（2026-09-29 重构，按媒体源分派解析器）：
 - 中国石油报（epaper.cnpc.com.cn）：数字报是 SPA 单页应用，但 epaperObject JSON
@@ -45,6 +45,7 @@ class ArticleContent:
     summary: str | None
     body_text: str | None
     has_image: bool = False
+    image_urls: str | None = None
 
 
 # ---------------- 网络层 ----------------
@@ -160,9 +161,24 @@ def extract_links(html: str, base_url: str) -> list[ArticleLink]:
     return links
 
 
+
+
+def _extract_image_urls(soup) -> tuple[bool, str | None]:
+    """从 BeautifulSoup 对象提取所有 img 的 src，返回 (是否有图, JSON字符串)。"""
+    imgs = soup.find_all("img")
+    urls = []
+    for img in imgs:
+        src = img.get("src") or img.get("data-src") or img.get("data-original")
+        if src and not src.startswith("data:"):
+            urls.append(src)
+    if not urls:
+        return False, None
+    return True, json.dumps(urls, ensure_ascii=False)
+
 def extract_article(html: str) -> ArticleContent | None:
     """兜底：从详情页解析正文，找最长文本块容器。"""
     soup = BeautifulSoup(html, "html.parser")
+    has_image, image_urls = _extract_image_urls(soup)
     title = (soup.find("h1") or soup.find("title"))
     title = title.get_text(strip=True) if title else "(无标题)"
     candidates = soup.find_all(["div", "article", "section"])
@@ -186,6 +202,7 @@ def extract_article(html: str) -> ArticleContent | None:
     return ArticleContent(
         title=title, author=author, publish_date=publish_date,
         summary=body[:80].replace("\n", " ") + "…", body_text=body,
+        has_image=has_image, image_urls=image_urls,
     )
 
 
@@ -298,12 +315,16 @@ def crawl_zgsyb(src: dict) -> dict:
             cid = a.get("contentid")
             # 文章 URL：构造锚点定位到当期 SPA 页（正文已在 body_text 里，URL 仅供审核台点开参考）
             art_url = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/#con_{cid}"
-            has_image = bool(re.search(r"<img\s", body_html, re.I))
+            # 提取图片URL
+            img_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', body_html, re.I)
+            img_urls = [u for u in img_matches if not u.startswith("data:")]
+            has_image = len(img_urls) > 0
+            image_urls = json.dumps(img_urls, ensure_ascii=False) if img_urls else None
             if has_image:
                 added = db.upsert_article(
                     col_id, title=title, url=art_url, author=author,
                     publish_date=cur_date_iso, summary=summary, body_text=body_text,
-                    content_hash=content_hash(body_text), has_image=True,
+                    content_hash=content_hash(body_text), has_image=True, image_urls=image_urls,
                 )
             else:
                 rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
@@ -314,7 +335,7 @@ def crawl_zgsyb(src: dict) -> dict:
                 added = db.upsert_article(
                     col_id, title=title, url=art_url, author=author,
                     publish_date=cur_date_iso, summary=summary, body_text=body_text,
-                    content_hash=content_hash(body_text), has_image=False,
+                    content_hash=content_hash(body_text), has_image=False, image_urls=image_urls,
                 )
             if added:
                 stats["added"] += 1
@@ -349,6 +370,7 @@ def parse_lnd_layout(html: str, base_url: str) -> list[ArticleLink]:
 def parse_lnd_article(html: str) -> ArticleContent | None:
     """辽宁日报详情页：提取标题/作者/正文。"""
     soup = BeautifulSoup(html, "html.parser")
+    has_image, image_urls = _extract_image_urls(soup)
     title = None
     # 标题选择器：辽宁日报详情页标题在 <h3>（h1/h2 为空），依次试 h1→h3→标题容器→<title>
     for finder in (
@@ -388,6 +410,7 @@ def parse_lnd_article(html: str) -> ArticleContent | None:
     return ArticleContent(
         title=title or "(无标题)", author=author, publish_date=publish_date,
         summary=body[:80].replace("\n", " "), body_text=body,
+        has_image=has_image, image_urls=image_urls,
     )
 
 
@@ -442,6 +465,7 @@ def crawl_lnd(src: dict) -> dict:
                     publish_date=art.publish_date, summary=art.summary,
                     body_text=art.body_text, content_hash=content_hash(art.body_text),
                     has_image=True,
+                    image_urls=art.image_urls,
                 )
             else:
                 rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
@@ -454,6 +478,7 @@ def crawl_lnd(src: dict) -> dict:
                     publish_date=art.publish_date, summary=art.summary,
                     body_text=art.body_text, content_hash=content_hash(art.body_text),
                     has_image=False,
+                    image_urls=art.image_urls,
                 )
             if added:
                 stats["added"] += 1
@@ -504,6 +529,7 @@ def crawl_generic(src: dict) -> dict:
                     publish_date=art.publish_date, summary=art.summary,
                     body_text=art.body_text, content_hash=content_hash(art.body_text),
                     has_image=True,
+                    image_urls=art.image_urls,
                 )
             else:
                 rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
@@ -516,6 +542,7 @@ def crawl_generic(src: dict) -> dict:
                     publish_date=art.publish_date, summary=art.summary,
                     body_text=art.body_text, content_hash=content_hash(art.body_text),
                     has_image=False,
+                    image_urls=art.image_urls,
                 )
             if added:
                 stats["added"] += 1
