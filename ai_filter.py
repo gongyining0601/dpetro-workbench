@@ -1,8 +1,10 @@
-"""AI 稿件过滤：调用 Silicon Flow 兼容接口判断稿件是否与锦州石化相关。
+"""AI 稿件过滤：默认智谱 GLM 免费模型判断稿件是否与锦州石化相关，失败回退硅基流动 Qwen。
 
 设计要点：
 - 只做"是否相关"的二分类 + 可选的角度标签，给"相关"稿打 1~3 个角度标签。
-- 失败安全：单次失败标记为"相关"（避免漏稿），由人工 5 分钟审核兜底。
+- 服务商优先级：智谱 GLM（主力，免费）→ 硅基流动 Qwen（后备）。
+- 硬规则兜底优先执行：标题/正文命中石化关键词直接判相关，不依赖 LLM。
+- 失败安全：API 失败时根据连续失败次数决定放行或拒绝。
 - 连续失败熔断：连续 FAIL_CIRCUIT_BREAKER 次失败后切换为保守拒绝（relevant=False），
   防止 API 欠费/故障时无关稿大量涌入。成功一次自动重置计数。
 - 严格 JSON 解析：用括号配对栈提取首个完整 JSON 对象，避免贪婪匹配误判。
@@ -134,15 +136,14 @@ def _reset_failures():
 
 
 def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[bool, list[str]]:
-    """调用 Silicon Flow 过滤。返回 (是否相关, 角度标签列表)。
+    """调用 AI 过滤（默认智谱 GLM，失败回退硅基流动 Qwen）。
 
+    返回 (是否相关, 角度标签列表)。
     失败时根据连续失败次数决定放行或拒绝（见 _decide_on_failure）。
     """
     # 熔断：连续失败超过阈值后直接拒绝，避免 API 故障时大量无效调用
     if _consecutive_failures >= FAIL_CIRCUIT_BREAKER:
         return (False, [])
-
-    api_key = os.getenv("SILICONFLOW_API_KEY", "")
 
     # 硬规则兜底：标题/正文命中石化行业关键词直接判相关，不依赖 LLM
     _PETRO_KEYWORDS = (
@@ -161,54 +162,71 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
     for kw in _PETRO_KEYWORDS:
         if kw in _check_text:
             # 命中硬规则：返回相关，标签取命中的关键词
-            return (True, [kw] if kw not in ("中国石油", "中石化", "中海油", "中石油") else ["行业动态"])
-
-    if not api_key:
-        return _decide_on_failure()
+            return (True, [kw] if kw not in ("中国石油", "中石化", "中海油", "中海油") else ["行业动态"])
 
     body_excerpt = (body_text or "")[:2000]
     user_prompt = f"标题：{title}\n摘要：{summary or '无'}\n正文：{body_excerpt}"
 
-    try:
-        resp = _session.post(
-            config.SF_CHAT_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": config.SF_CHAT_MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 300,
-            },
-            timeout=30,
-        )
-    except requests.RequestException:
+    def _call(base: str, api_key: str, model: str) -> dict | None:
+        try:
+            resp = _session.post(
+                base,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 300,
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except requests.RequestException:
+            return None
+
+    def _parse_and_return(data: dict):
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            return None
+        parsed = _parse_ai_response(content)
+        relevant = bool(parsed.get("relevant", False))
+        angles = parsed.get("angles") or []
+        if not isinstance(angles, list):
+            angles = []
+        angles = [str(a)[:20] for a in angles if a][:3]
+        _reset_failures()
+        return (relevant, angles)
+
+    # 1) 主力：智谱 GLM（免费）
+    zp_key = os.getenv("ZHIPU_API_KEY", "")
+    if zp_key:
+        data = _call(config.ZHIPU_CHAT_URL, zp_key, config.ZHIPU_CHAT_MODEL)
+        if data:
+            r = _parse_and_return(data)
+            if r is not None:
+                return r
+
+    # 2) 后备：硅基流动 Qwen（原方案）
+    config.logger.info("ai_filter: 智谱调用失败或未配 Key，回退到硅基流动 Qwen")
+    sf_key = os.getenv("SILICONFLOW_API_KEY", "")
+    if not sf_key:
         return _decide_on_failure()
-
-    if resp.status_code != 200:
+    data = _call(config.SF_CHAT_URL, sf_key, config.SF_CHAT_MODEL)
+    if not data:
         return _decide_on_failure()
-
-    try:
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-    except (ValueError, KeyError, IndexError, TypeError):
-        return _decide_on_failure()
-
-    parsed = _parse_ai_response(content)
-    relevant = bool(parsed.get("relevant", False))
-    angles = parsed.get("angles") or []
-    if not isinstance(angles, list):
-        angles = []
-    angles = [str(a)[:20] for a in angles if a][:3]
-
-    # 成功解析，重置失败计数
-    _reset_failures()
-    return (relevant, angles)
+    r = _parse_and_return(data)
+    if r is not None:
+        return r
+    return _decide_on_failure()
 
 
 if __name__ == "__main__":
