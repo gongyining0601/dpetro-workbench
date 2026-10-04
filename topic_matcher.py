@@ -116,7 +116,7 @@ def _fetch_reviewed_articles():
 
 def ensure_index_synced() -> dict:
     """同步 PG 已审稿到向量索引。返回统计。幂等，可重复跑。"""
-    stats = {"in_sqlite": 0, "in_index": 0, "added": 0,
+    stats = {"in_db": 0, "in_index": 0, "added": 0,
              "updated": 0, "removed": 0, "fallback": False, "error": None}
     store = _init()
     if store is None:
@@ -125,7 +125,7 @@ def ensure_index_synced() -> dict:
 
     try:
         rows = _fetch_reviewed_articles()
-        stats["in_sqlite"] = len(rows)
+        stats["in_db"] = len(rows)
         stats["in_index"] = store.count()
 
         pg_ids = {str(r["id"]) for r in rows}
@@ -453,7 +453,7 @@ if __name__ == "__main__":
     """
     stats = ensure_index_synced()
     print(f"[topic_matcher] 同步完成："
-          f"in_db={stats.get('in_sqlite', 0)}, "
+          f"in_db={stats.get('in_db', 0)}, "
           f"in_index={stats.get('in_index', 0)}, "
           f"added={stats.get('added', 0)}, "
           f"removed={stats.get('removed', 0)}, "
