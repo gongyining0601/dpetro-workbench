@@ -61,12 +61,19 @@ ZHIPU_API_KEY = _clean_key(os.environ.get("ZHIPU_API_KEY", ""))
 ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 ZHIPU_CHAT_MODEL = os.environ.get("ZHIPU_CHAT_MODEL", "GLM-4.7-Flash")
 
-# ---------- Silicon Flow 免费 embedding API ----------
-# 注册 https://siliconflow.cn 后在「账号 → API 密钥」新建，免费送 14 元 ≈ 1.5 亿次嵌入调用
+# ---------- 语义 embedding API（智谱 embedding-3，0.5 元/百万 tokens） ----------
+# 2026-10-04 从 SiliconFlow 切换到智谱：SiliconFlow 账户需余额才放行（402），
+# 智谱 embedding-3 复用已有 ZHIPU_API_KEY，无需额外配置，成本极低。
+# 接口文档：https://docs.bigmodel.cn/cn/guide/models/embedding/embedding-3
+SF_EMBED_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
+SF_EMBED_MODEL = "embedding-3"  # 智谱 embedding-3，支持 256-2048 维
+SF_EMBED_DIM = 1024  # embedding-3 自定义维度 1024（精度与存储的平衡）
+# embedding 复用智谱 key（不再依赖 SILICONFLOW_API_KEY）
+EMBED_API_KEY = ZHIPU_API_KEY
+
+# ---------- Silicon Flow API Key（仅用于 ai_filter.py 的 chat 后备） ----------
+# 注意：SiliconFlow 账户若余额为 0，chat 也会返回 402，此时 ai_filter 自动回退启发式。
 SF_API_KEY = _clean_key(os.environ.get("SILICONFLOW_API_KEY", ""))
-SF_EMBED_URL = "https://api.siliconflow.cn/v1/embeddings"
-SF_EMBED_MODEL = "BAAI/bge-large-zh-v1.5"  # 升级到 large，比本地 base 更准
-SF_EMBED_DIM = 1024  # bge-large-zh-v1.5 输出维度（base 是 768）
 
 # ---------- Silicon Flow 免费 LLM (chat) API（保留作智谱失败时的后备） ----------
 # 复用同一个 SF_API_KEY；chat 用于 AI 初选（爬虫入库前判断相关性，过滤无关稿）
