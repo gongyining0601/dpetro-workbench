@@ -1,4 +1,4 @@
-﻿"""选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
+"""选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
 
 2026-09-29 改造（方案 A 上云版）：
 - 嵌入从本地 bge（sentence-transformers + torch）改为 Silicon Flow 免费 API
@@ -317,8 +317,8 @@ def _match_keywords(keywords: list[str], top_k: int) -> list[dict]:
 
 def _angle_advice_llm(keywords: list[str], matched: list[dict]) -> list[str] | None:
     """LLM 生成量身角度建议（智谱→腾讯云回退）。失败返回 None（调用方回退启发式）。"""
-    zp_key = os.getenv("ZHIPU_API_KEY", "")
-    tc_key = os.getenv("TENCENTCLOUD_API_KEY", "")
+    zp_key = config.ZHIPU_API_KEY
+    tc_key = config.TENCENTCLOUD_API_KEY
     if not (zp_key or tc_key):
         return None
 
@@ -388,9 +388,9 @@ def _angle_advice_llm(keywords: list[str], matched: list[dict]) -> list[str] | N
     # 2) 腾讯云 deepseek
     if tc_key:
         data = _call(
-            "https://tokenhub.tencentmaas.com/v1/chat/completions",
+            config.TENCENTCLOUD_CHAT_URL,
             tc_key,
-            "deepseek-v4-flash-202605",
+            config.TENCENTCLOUD_CHAT_MODEL,
         )
         if data:
             parsed = _parse(data)
