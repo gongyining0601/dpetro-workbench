@@ -245,12 +245,17 @@ def extract_caption_or_short(soup, body_text: str) -> str:
     return (body_text or "")[:200]
 
 
+# AI 调用统计（模块级，crawl_all 读取后汇入 stats）
+_ai_stats = {"called": 0, "accepted": 0, "rejected": 0, "failed": 0}
+
+
 def classify_article(src_name: str, col_name: str, title: str, body_text: str = "") -> str | None:
     """判定文章是否属于 5 类之一。返回类别名或 None（不属于则丢弃）。
 
     主路径：CATEGORY_MAP 按「源/栏目」精确匹配（零 API 成本）
     兜底1：标题关键词匹配
     兜底2：AI 语义过滤（ai_filter.is_relevant），仅在前两者都未命中时调用
+    AI 失败时返回特殊标记 "_AI_FAILED_"，调用方应跳过但不计入"无关丢弃"
     """
     sc = f"{src_name}/{col_name}"
     # 主路径
@@ -264,13 +269,25 @@ def classify_article(src_name: str, col_name: str, title: str, body_text: str = 
             if kw in blob:
                 return cat
     # 兜底2：AI 语义过滤（仅在规则无法判定时调用，避免不必要的 API 开销）
+    # AI 调用前加节流，避免拉长 CI 时间
+    time.sleep(0.5)
+    _ai_stats["called"] += 1
     try:
-        relevant, _ = ai_filter.is_relevant(title=title, body_text=body_text)
+        result = ai_filter.is_relevant(title=title, body_text=body_text)
+        if result is None:
+            # AI 调用失败（API 错误/熔断），跳过但不丢弃
+            _ai_stats["failed"] += 1
+            return "_AI_FAILED_"
+        relevant, _ = result
         if relevant:
-            # AI 判定相关但规则无类别匹配时，归入"综合"类别
+            _ai_stats["accepted"] += 1
             return "综合"
+        else:
+            _ai_stats["rejected"] += 1
     except Exception as e:
-        config.logger.warning(f"ai_filter 调用失败，按无关处理: {e}")
+        config.logger.warning(f"ai_filter 调用异常: {e}")
+        _ai_stats["failed"] += 1
+        return "_AI_FAILED_"
     return None
 
 
@@ -654,6 +671,10 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col_name, title, body_text)
+            if cat == "_AI_FAILED_":
+                # AI 调用失败：跳过但不计入"无关丢弃"，等 API 恢复后补爬
+                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
+                continue
             if not cat:
                 stats["skipped_category"] = stats.get("skipped_category", 0) + 1
                 continue
@@ -834,6 +855,9 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            if cat == "_AI_FAILED_":
+                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
+                continue
             if not cat:
                 stats["skipped_category"] = stats.get("skipped_category", 0) + 1
                 continue
@@ -914,6 +938,9 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            if cat == "_AI_FAILED_":
+                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
+                continue
             if not cat:
                 stats["skipped_category"] += 1
                 continue
@@ -1091,6 +1118,9 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            if cat == "_AI_FAILED_":
+                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
+                continue
             if not cat:
                 stats["skipped_category"] += 1
                 continue
@@ -1148,12 +1178,17 @@ def crawl_all(target_date: date | None = None) -> dict:
             else:
                 s = crawl_generic(src)
             for k in ("fetched", "added", "skipped", "blocked",
-                       "skipped_no_image", "skipped_category"):
+                       "skipped_no_image", "skipped_category", "skipped_ai_failed"):
                 stats[k] = stats.get(k, 0) + s.get(k, 0)
         except Exception as e:
             err_msg = f"{name}: {type(e).__name__}: {e}"
             config.logger.info(f"[crawl_all] 媒体源出错，跳过：{err_msg}")
             stats["errors"].append(err_msg)
+    # 汇入模块级 AI 调用统计（供 main() 告警判断）
+    stats["ai_called"] = _ai_stats["called"]
+    stats["ai_accepted"] = _ai_stats["accepted"]
+    stats["ai_rejected"] = _ai_stats["rejected"]
+    stats["ai_failed"] = _ai_stats["failed"]
     return stats
 
 
@@ -1186,7 +1221,7 @@ def crawl_date_range(start_date: str | date, end_date: str | date) -> dict:
         config.logger.info(f"\n>>> 日期 {cur.isoformat()} <<<")
         day_stats = crawl_all(target_date=cur)
         for k in ("fetched", "added", "skipped", "blocked",
-                   "skipped_no_image", "skipped_category"):
+                   "skipped_no_image", "skipped_category", "skipped_ai_failed"):
             total[k] += day_stats.get(k, 0)
         total["errors"].extend(day_stats.get("errors", []))
         cur += timedelta(days=1)
@@ -1198,7 +1233,7 @@ def crawl_date_range(start_date: str | date, end_date: str | date) -> dict:
         if src["name"] == "中国化工报":
             s = crawl_ccin(src, date_range=(start_date, end_date))
             for k in ("fetched", "added", "skipped", "blocked",
-                       "skipped_no_image", "skipped_category"):
+                       "skipped_no_image", "skipped_category", "skipped_ai_failed"):
                 total[k] += s.get(k, 0)
             total["errors"].extend(s.get("errors", []))
             break
@@ -1290,7 +1325,35 @@ def main():
           f"新增 {stats['added']}，跳过(已存在) {stats['skipped']}，"
           f"无图跳过 {stats.get('skipped_no_image', 0)}，"
           f"非5类跳过 {stats.get('skipped_category', 0)}，"
+          f"AI失败跳过 {stats.get('skipped_ai_failed', 0)}，"
           f"robots拦截 {stats['blocked']}")
+    # AI 调用统计：若 AI 被调用，打印调用/接受/拒绝/失败数
+    ai_called = stats.get("ai_called", 0)
+    if ai_called:
+        config.logger.info(
+            f"AI 过滤统计：调用 {ai_called}，"
+            f"接受 {stats.get('ai_accepted', 0)}，"
+            f"拒绝 {stats.get('ai_rejected', 0)}，"
+            f"失败 {stats.get('ai_failed', 0)}"
+        )
+        # 异常告警1：AI 失败率畸高（>50%），规则层可能失效或 API 持续故障
+        ai_failed = stats.get("ai_failed", 0)
+        if ai_failed > 0 and ai_failed / ai_called > 0.5:
+            config.logger.error(
+                f"AI 失败率异常：{ai_failed}/{ai_called}（{(ai_failed/ai_called)*100:.0f}%），"
+                "规则层未命中的稿件大量走 AI 且失败，可能造成静默丢稿。"
+                "请检查 ZHIPU_API_KEY / SF_API_KEY 配置及 API 服务状态。"
+            )
+            sys.exit(1)
+        # 异常告警2：AI 调用占比畸高（>80%），说明规则层未命中，
+        # 几乎所有稿件都走 AI，规则字典需扩充
+        fetched = stats.get("fetched", 0)
+        if fetched > 0 and ai_called / fetched > 0.8:
+            config.logger.warning(
+                f"AI 调用占比偏高：{ai_called}/{fetched}（{(ai_called/fetched)*100:.0f}%），"
+                "规则层命中率低，建议扩充 CATEGORY_MAP / CATEGORY_KEYWORDS，"
+                "减少对 AI 的依赖，降低 API 成本与 CI 耗时。"
+            )
     # 静默失败告警：有源出错或全部源零抓取时非 0 退出，CI 变红
     if stats.get("errors"):
         config.logger.error(f"以下媒体源抓取失败：{stats['errors']}")

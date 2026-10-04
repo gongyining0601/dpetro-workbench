@@ -96,12 +96,16 @@ def _parse_ai_response(content: str) -> dict:
         return {}
 
 
-def _decide_on_failure() -> tuple[bool, list[str]]:
-    """API 失败时一律拒绝：非石化稿不采纳，宁可漏不可放。
-    API 恢复后爬虫会自动补爬，不会永久漏稿。"""
+def _decide_on_failure() -> None:
+    """API 失败时返回 None（与"判定无关"的 (False, []) 区分）。
+    连续失败达阈值时触发熔断并告警。"""
     global _consecutive_failures
     _consecutive_failures += 1
-    return (False, [])
+    if _consecutive_failures == FAIL_CIRCUIT_BREAKER:
+        config.logger.warning(
+            f"[ai_filter] 连续失败 {_consecutive_failures} 次，熔断已打开，"
+            "后续 AI 调用将被跳过，规则未命中的稿件将被跳过（不丢弃也不入库）"
+        )
 
 
 def get_failure_status() -> dict:
@@ -119,15 +123,17 @@ def _reset_failures():
     _consecutive_failures = 0
 
 
-def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[bool, list[str]]:
+def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[bool, list[str]] | None:
     """调用 AI 过滤（默认智谱 GLM，失败回退硅基流动 Qwen）。
 
-    返回 (是否相关, 角度标签列表)。
-    失败时根据连续失败次数决定放行或拒绝（见 _decide_on_failure）。
+    返回值：
+    - (True, angles)  相关
+    - (False, [])     判定为无关（AI 正常工作，只是结果是不相关）
+    - None            AI 调用失败（API 错误/熔断/超时），调用方应跳过而非丢弃
     """
-    # 熔断：连续失败超过阈值后直接拒绝，避免 API 故障时大量无效调用
+    # 熔断：连续失败超过阈值后直接返回 None，避免 API 故障时大量无效调用
     if _consecutive_failures >= FAIL_CIRCUIT_BREAKER:
-        return (False, [])
+        return None
 
     # 硬规则兜底：标题/正文命中石化行业关键词直接判相关，不依赖 LLM
     _PETRO_KEYWORDS = (
@@ -221,15 +227,14 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
     config.logger.info("ai_filter: 智谱调用失败或未配 Key，回退到硅基流动 Qwen")
     sf_key = config.SF_API_KEY
     if not sf_key:
-        return _decide_on_failure()
+        _decide_on_failure()
+        return None
     data = _call(config.SF_CHAT_URL, sf_key, config.SF_CHAT_MODEL)
     if not data:
-        return _decide_on_failure()
+        _decide_on_failure()
+        return None
     r = _parse_and_return(data)
     if r is not None:
         return r
-    return _decide_on_failure()
-
-
-if __name__ == "__main__":
-    print(is_relevant("锦州石化春检圆满收官"))
+    _decide_on_failure()
+    return None
