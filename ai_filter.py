@@ -46,29 +46,13 @@ FAIL_CIRCUIT_BREAKER = 5
 _consecutive_failures = 0
 
 SYSTEM_PROMPT = (
-    "你是锦州石化（中国石油锦州石化分公司，位于辽宁锦州）的宣传编辑。"
-    "给定一篇媒体稿件的标题与正文，判断它是否可作为锦州石化新闻宣传的参考选题。"
-    "只输出 JSON：{"
-    '\"relevant\": true/false, '
-    '\"angles\": [\"角度1\", \"角度2\"]'
-    "}。"
-    "【判定原则：严格把关，非石油石化行业一律 relevant=false。"
-    "拿不准时一律 relevant=false，宁可错杀，不可放过。】"
-    "relevant=true 仅当（满足任一）："
-    "1. 明确属于石油石化产业链：油气勘探开发、采油钻井、炼油化工（乙烯/催化/加氢/"
-    "重整/常减压/焦化/烷基化/芳烃）、天然气/LNG/储气库、油气管道、油气销售、"
-    "石化装备制造、石化科研院所；"
-    "2. 直接提到中国石油/中石化/中海油/中石油/锦州石化/辽河油田/大庆油田等"
-    "石油石化系统内单位；"
-    "3. 能源化工主题且主体是石化企业：CCUS、碳达峰碳中和、氢能、光伏风电新能源"
-    "（仅当主体是石化企业时）。"
-    "relevant=false 的情形（常见）：煤炭、电力、冶金、建材、农业种养殖、文学副刊、"
-    "公安政法、娱乐体育、社会民生（非能源）、教育医疗、消费财经（非工业）、"
-    "建筑施工、交通运输（非油气管道）、信息技术。"
-    "注意：即使提到\"安全生产/春检/秋检/隐患排查/党建/班组/提质增效\"等通用词，"
-    "只要主体不是石油石化企业，一律 relevant=false。"
-    "angles 最多 3 个简短中文标签（如：勘探、炼化、天然气、CCUS、保供、设备、安全、"
-    "人物、新材料、党建），irrelevant 时为空数组。不要输出 JSON 以外的任何文字。"
+    "你是锦州石化宣传编辑。判断稿件是否可作锦州石化新闻参考选题。"
+    '只输出 JSON：{"relevant": true/false, "angles": ["角度1","角度2"]}。'
+    "relevant=true 仅当：石油石化产业链（勘探/采油/炼油化工/天然气/管道/销售/装备/科研）"
+    "或提到中石油/中石化/中海油/锦州石化等系统内单位，或主体是石化企业的能源化工。"
+    "relevant=false：煤炭、电力、冶金、建材、农业、文学、公安、娱乐、教育医疗、消费财经、建筑、交通。"
+    "拿不准一律 false。angles 最多 3 个简短标签（勘探/炼化/天然气/CCUS/保供/设备/安全/人物/党建）。"
+    "irrelevant 时 angles 为空数组。不要输出 JSON 以外的文字。"
 )
 
 
@@ -155,16 +139,29 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
         # 石油石化系统内单位
         "中国石油", "中石化", "中海油", "中石油", "昆仑", "长庆", "塔里木",
         "大庆", "胜利", "辽河", "锦州石化", "锦州石油",
-        # 能源化工（明确石化相关，避免"碳中和/氢能/新材料"等通用词误匹配）
+        # 能源化工（明确石化相关）
         "CCUS", "化工新材料", "石化新材料", "高端化工", "精细化工",
+    )
+    # 负面硬规则：明显非石化行业直接拒绝，不调 LLM（提速）
+    _NEGATIVE_KEYWORDS = (
+        "煤炭", "煤矿", "电力", "电网", "风电", "光伏", "太阳能", "冶金", "钢铁",
+        "建材", "水泥", "玻璃", "农业", "种植", "养殖", "畜牧", "粮食",
+        "文学", "副刊", "散文", "诗歌", "公安", "警察", "法院", "检察",
+        "娱乐", "体育", "明星", "电影", "教育", "学校", "医院", "医疗",
+        "消费", "财经", "股市", "银行", "保险", "建筑", "房地产", "楼市",
+        "交通", "铁路", "公路", "航空", "港口", "物流", "快递",
     )
     _check_text = f"{title} {summary} {body_text}"
     for kw in _PETRO_KEYWORDS:
         if kw in _check_text:
             # 命中硬规则：返回相关，标签取命中的关键词
-            return (True, [kw] if kw not in ("中国石油", "中石化", "中海油", "中海油") else ["行业动态"])
+            return (True, [kw] if kw not in ("中国石油", "中石化", "中海油") else ["行业动态"])
+    # 负面硬规则：命中明显非石化行业词且无任何石化词 → 直接拒绝
+    for kw in _NEGATIVE_KEYWORDS:
+        if kw in _check_text:
+            return (False, [])
 
-    body_excerpt = (body_text or "")[:2000]
+    body_excerpt = (body_text or "")[:1000]
     user_prompt = f"标题：{title}\n摘要：{summary or '无'}\n正文：{body_excerpt}"
 
     def _call(base: str, api_key: str, model: str) -> dict | None:
@@ -182,7 +179,8 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 300,
+                    "max_tokens": 100,
+                    "thinking": {"type": "disabled"},
                 },
                 timeout=30,
             )
