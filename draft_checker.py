@@ -9,6 +9,8 @@ import json
 import os
 import requests as _requests
 
+import config as _config_zhipu
+
 
 def _extract_json_array(text: str) -> list | None:
     """用括号配对栈提取首个完整 JSON 数组，避免贪婪正则误匹配。"""
@@ -163,13 +165,13 @@ def check(draft_title: str, draft_text: str, caption: str = "") -> dict:
 import os
 import requests as _requests
 
-_TC_BASE = "https://tokenhub.tencentmaas.com/v1/chat/completions"
-_MODEL_PROOFREAD = "deepseek-v4-flash-202605"
+_TC_BASE = _config_zhipu.TENCENTCLOUD_CHAT_URL
+_MODEL_PROOFREAD = _config_zhipu.TENCENTCLOUD_CHAT_MODEL
 
 
 def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
     """AI 深度校对：错别字、标点、语病、新闻规范、数字单位、敏感表述。"""
-    api_key = os.getenv("TENCENTCLOUD_API_KEY", "")
+    api_key = _config_zhipu.TENCENTCLOUD_API_KEY
     if not api_key:
         return {"ai_issues": ["未配置 TENCENTCLOUD_API_KEY，跳过 AI 校对"], "ok": False}
 
@@ -352,7 +354,7 @@ def _version_advice_llm(draft_title: str, draft_text: str, caption: str, version
         return {"advice": [str(a) for a in advice], "lead_example": lead}
 
     # 1) 主力：智谱 GLM（免费）
-    zp_key = os.getenv("ZHIPU_API_KEY", "")
+    zp_key = _config_zhipu.ZHIPU_API_KEY
     if zp_key:
         data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
         if data:
@@ -363,7 +365,7 @@ def _version_advice_llm(draft_title: str, draft_text: str, caption: str, version
 
     # 2) 后备：腾讯云 deepseek
     _config_zhipu.logger.info(f"draft_checker: 智谱三版适配({version})失败或未配 Key，回退腾讯云")
-    tc_key = os.getenv("TENCENTCLOUD_API_KEY", "")
+    tc_key = _config_zhipu.TENCENTCLOUD_API_KEY
     if tc_key:
         data = _call(_TC_BASE, tc_key, _MODEL_PROOFREAD)
         if data:
