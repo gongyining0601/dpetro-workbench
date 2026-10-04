@@ -1,8 +1,9 @@
 """选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
 
 2026-09-29 改造（方案 A 上云版）：
-- 嵌入从本地 bge（sentence-transformers + torch）改为 Silicon Flow 免费 API
-  - 模型 BAAI/bge-large-zh-v1.5（从 base 升级到 large，更准；维度 1024）
+- 嵌入从本地 bge（sentence-transformers + torch）改为云端 API
+  - 2026-10-04 从 SiliconFlow 切换到智谱 embedding-3（SiliconFlow 需余额 402）
+  - 模型 embedding-3，维度 1024
   - 不占 1GB RAM（torch/sentence-transformers 已从 requirements 去掉）
   - 失败时自动回退关键词字符串包含打分（原 MVP 逻辑）
 - 向量存储: vector_store.NumpyVectorStore（PG 表 article_embedding 读写 + 内存 numpy cosine）
@@ -50,16 +51,17 @@ def _init():
 
 
 def _embed_batch(texts: list[str]) -> list[list[float]]:
-    """Silicon Flow API 批量嵌入。返回归一化向量列表。
+    """智谱 embedding-3 批量嵌入。返回归一化向量列表。
 
-    单次最多传 32 条文本（API 限频策略保守值）；超过自动分批。
+    单次最多传 32 条文本；超过自动分批。
+    智谱 embedding-3 支持 dimensions 参数（256-2048）。
     """
     if not texts:
         return []
-    if not config.SF_API_KEY:
-        raise RuntimeError("SILICONFLOW_API_KEY 未设置")
+    if not config.EMBED_API_KEY:
+        raise RuntimeError("ZHIPU_API_KEY 未设置（embedding 复用智谱 key）")
 
-    headers = {"Authorization": f"Bearer {config.SF_API_KEY}"}
+    headers = {"Authorization": f"Bearer {config.EMBED_API_KEY}"}
     out: list[list[float]] = []
     BATCH = 32
     for i in range(0, len(texts), BATCH):
@@ -71,6 +73,7 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
                 "model": config.SF_EMBED_MODEL,
                 "input": batch,
                 "encoding_format": "float",
+                "dimensions": config.SF_EMBED_DIM,
             },
             timeout=30,
         )
