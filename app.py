@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import json
 import os
-
 import re
+from datetime import date, timedelta
 
 import streamlit as st
 
@@ -270,6 +270,47 @@ with st.sidebar:
             if st.button("取消", key="btn_cleanup_cancel", width="stretch"):
                 st.session_state.pop("_confirm_cleanup", None)
                 st.rerun()
+    # 手动爬取
+    st.divider()
+    st.subheader("🔄 手动爬取")
+    if st.button("📅 立即爬取今日", key="btn_crawl_today", type="primary", width="stretch"):
+        with st.spinner("正在爬取各媒体今日稿件（约 1-3 分钟）..."):
+            try:
+                stats = crawler.crawl_all()
+                db.set_setting("last_crawl_date", _time.strftime("%Y-%m-%d"))
+                _invalidate_caches()
+                st.success(f"爬取完成：新增 {stats.get('added', 0)} 条，"
+                           f"跳过 {stats.get('skipped', 0)} 条，"
+                           f"无图过滤 {stats.get('skipped_no_image', 0)} 条")
+            except Exception as e:
+                st.error(f"爬取失败：{e}")
+    st.caption("补爬多日：选择起止日期，重复稿件自动跳过")
+    last_crawl = db.get_setting("last_crawl_date")
+    try:
+        _default_start = date.fromisoformat(last_crawl) + timedelta(days=1) if last_crawl else date.today()
+    except (ValueError, TypeError):
+        _default_start = date.today()
+    _default_start = min(_default_start, date.today())
+    col_s, col_e = st.columns(2)
+    with col_s:
+        crawl_start = st.date_input("起始日期", value=_default_start, key="crawl_start")
+    with col_e:
+        crawl_end = st.date_input("结束日期", value=date.today(), key="crawl_end")
+    if st.button("🚀 开始范围爬取", key="btn_crawl_range", width="stretch"):
+        if crawl_start > crawl_end:
+            st.error("起始日期不能晚于结束日期")
+        else:
+            days = (crawl_end - crawl_start).days + 1
+            with st.spinner(f"正在爬取 {crawl_start} ~ {crawl_end}（共 {days} 天）..."):
+                try:
+                    stats = crawler.crawl_date_range(crawl_start, crawl_end)
+                    db.set_setting("last_crawl_date", crawl_end.isoformat())
+                    _invalidate_caches()
+                    st.success(f"范围爬取完成：新增 {stats.get('added', 0)} 条，"
+                               f"跳过 {stats.get('skipped', 0)} 条，"
+                               f"无图过滤 {stats.get('skipped_no_image', 0)} 条")
+                except Exception as e:
+                    st.error(f"爬取失败：{e}")
     # 退出登录
     if config.AUTH_ENABLED and st.session_state.get("authenticated"):
         st.divider()
