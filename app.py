@@ -31,6 +31,7 @@ import calendar_engine
 import topic_matcher
 import draft_checker
 import ai_writer
+import crawler
 
 st.set_page_config(page_title="行者", layout="wide")
 
@@ -52,10 +53,16 @@ def _normalize_display_url(url: str) -> str:
 
 
 def _safe_anchor(label: str, url: str) -> str:
-    """生成安全的 markdown 链接文本，仅允许 http/https 协议。"""
+    """生成安全的 markdown 链接文本，仅允许 http/https 协议。
+
+    中国石油报是 SPA 数字报，单篇无独立 URL，链接指向当期整版+锚点，
+    故将链接文案统一改为「查看当期版面」，避免误导为单篇原文。
+    """
     safe_url = _normalize_display_url((url or "").strip())
     if not safe_url.startswith(("http://", "https://")):
         return f"{_md_escape(label)}：{_md_escape(safe_url)}"
+    if "epaper.cnpc.com.cn" in safe_url:
+        label = "查看当期版面"
     return f"[{_md_escape(label)}]({safe_url})"
 
 
@@ -163,6 +170,7 @@ if config.AUTH_ENABLED:
 
 
 import time as _time
+import threading as _threading
 
 # 清理过期未审核稿件（每 5 分钟跑一次，避免每次交互都查库）
 # 非阻塞：失败不影响审核台使用，只记日志
@@ -176,6 +184,27 @@ if (_time.time() - _last_cleanup) > _CLEANUP_INTERVAL:
             config.logger.info(f"清理 {_cleaned} 条过期未审核稿件")
     except Exception as _e:
         config.logger.warning(f"cleanup_old_unreviewed 失败（不影响审核台使用）: {_e}")
+
+
+# 启动时自动爬取：若今天还没爬过，后台线程跑一次 crawler（不阻塞 UI）
+_today_str = _time.strftime("%Y-%m-%d")
+if not st.session_state.get("crawl_started_today"):
+    try:
+        _last_crawl = db.get_setting("last_crawl_date")
+    except Exception:
+        _last_crawl = None
+    if _last_crawl != _today_str:
+        def _bg_crawl():
+            try:
+                crawler.crawl_all()
+                db.set_setting("last_crawl_date", _today_str)
+                config.logger.info("后台自动爬取完成")
+            except Exception as _e:
+                config.logger.warning(f"后台自动爬取失败: {_e}")
+        _t = _threading.Thread(target=_bg_crawl, daemon=True)
+        _t.start()
+        st.session_state["crawl_started_today"] = True
+        config.logger.info("已启动后台自动爬取线程")
 
 # 向量索引同步：用 session_state 缓存，避免每次 rerun 都调 embedding API
 # 审核操作后会置 _force_vec_sync=True 强制同步；否则每 VEC_SYNC_INTERVAL 秒同步一次
@@ -293,7 +322,20 @@ with tab_review:
     st.caption("勾选多条 → 顶部「批量保存/删除」一次处理；保存=入资料库，删除=直接清理。")
     rows = _fetch_unreviewed_cached(limit=30)
     if not rows:
-        st.info("暂无待审稿件。运行 `python crawler.py` 拉取，或确认 config.py 已填栏目 URL。")
+        st.info("暂无待审稿件。点击下方按钮立即爬取，或确认 config.py 已填栏目 URL。")
+        if st.button("🔄 立即爬取今日稿件", type="primary"):
+            with st.spinner("正在爬取各媒体稿件（约 1-3 分钟）..."):
+                try:
+                    stats = crawler.crawl_all()
+                    db.set_setting("last_crawl_date", _time.strftime("%Y-%m-%d"))
+                    st.toast(
+                        f"完成：新增 {stats['added']} 条，跳过 {stats['skipped']} 条",
+                        icon="📰",
+                    )
+                except Exception as e:
+                    st.error(f"爬取失败：{e}")
+            _invalidate_caches()
+            st.rerun()
     else:
         all_ids = [r["id"] for r in rows]
 
@@ -304,13 +346,17 @@ with tab_review:
                 st.session_state[f"chk_{aid}"] = v
 
         # 顶部工具栏：全选 + 批量按钮
-        tool_cols = st.columns([1, 1.5, 1.5, 3])
-        with tool_cols[0]:
+        sel_cols = st.columns([1, 3])
+        with sel_cols[0]:
             st.checkbox("全选", key="chk_all", on_change=_toggle_all)
         # 实时统计选中数（从 session_state 读，全选 on_change 已同步过）
         selected_ids = [aid for aid in all_ids if st.session_state.get(f"chk_{aid}", False)]
         n_sel = len(selected_ids)
-        with tool_cols[1]:
+        with sel_cols[1]:
+            st.caption(f"已选 {n_sel} / {len(all_ids)} 条")
+        # 批量按钮单独一行，确保小屏也能完整显示
+        btn_cols = st.columns([1, 1, 4])
+        with btn_cols[0]:
             if st.button(f"💾 批量保存({n_sel})", key="btn_batch_save",
                          type="primary", disabled=(n_sel == 0), width="stretch"):
                 ok, n = _do_review_batch(selected_ids, "保存")
@@ -322,13 +368,11 @@ with tab_review:
                 else:
                     st.error("连接失败，请重试")
                 st.rerun()
-        with tool_cols[2]:
+        with btn_cols[1]:
             if st.button(f"🗑 批量删除({n_sel})", key="btn_batch_del",
                          disabled=(n_sel == 0), width="stretch"):
                 st.session_state["_pending_del_ids"] = list(selected_ids)
                 st.rerun()
-        with tool_cols[3]:
-            pass  # 占位
 
         # 删除二次确认
         if st.session_state.get("_pending_del_ids"):
@@ -641,25 +685,29 @@ with tab_material:
                 st.caption(f"共 {total} 张 · 第 {page + 1}/{total_pages} 页")
 
                 # 网格：每行 3 张，每张配元数据 + 逐张删 + 多选框
+                # key 统一用文件名 basename（唯一标识），避免删除/翻页后索引错位导致 widget 状态错乱
                 sel_keys = []  # [(key, path)] 用于批量删
                 for row_start in range(0, len(page_imgs), 3):
                     row = page_imgs[row_start:row_start + 3]
                     cols = st.columns(3)
                     for j, p in enumerate(row):
-                        i = row_start + j
-                        sel_key = f"sel_{page}_{i}_{os.path.basename(p)}"
+                        bn = os.path.basename(p)
+                        sel_key = f"sel_{bn}"
+                        del_key = f"del_{bn}"
                         sel_keys.append((sel_key, p))
                         with cols[j]:
                             st.image(p, width="stretch")
-                            st.caption(f"📄 {os.path.basename(p)}")
+                            st.caption(f"📄 {bn}")
                             st.caption(
                                 f"{os.path.getsize(p) // 1024} KB · "
                                 f"{_time.strftime('%m-%d %H:%M', _time.localtime(os.path.getmtime(p)))}"
                             )
-                            if st.button("🗑 删除", key=f"del_{page}_{i}"):
+                            if st.button("🗑 删除", key=del_key):
                                 try:
                                     os.remove(p)
-                                    st.toast(f"已删除 {os.path.basename(p)}", icon="🗑")
+                                    # 清理残留的 checkbox 状态，避免下次渲染时 key 仍为 True
+                                    st.session_state.pop(sel_key, None)
+                                    st.toast(f"已删除 {bn}", icon="🗑")
                                 except Exception as e:
                                     st.error(f"删除失败：{e}")
                                 st.rerun()
@@ -676,8 +724,9 @@ with tab_material:
                         st.rerun()
                 with bc2:
                     if st.button("清空本页选择", key="sel_clear"):
+                        # 用 pop 而非直接设 False：widget 已渲染时设其 key 会抛 StreamlitAPIException
                         for k, _ in sel_keys:
-                            st.session_state[k] = False
+                            st.session_state.pop(k, None)
                         st.session_state["_bulk_confirm"] = False
                         st.rerun()
 
@@ -694,7 +743,7 @@ with tab_material:
                                     except Exception:
                                         pass
                             for k, _ in sel_keys:
-                                st.session_state[k] = False
+                                st.session_state.pop(k, None)
                             st.session_state["_bulk_confirm"] = False
                             st.toast("批量删除完成", icon="🗑")
                             st.rerun()
@@ -770,12 +819,50 @@ with tab_writing:
                 with st.spinner("AI 正在撰写..."):
                     r = ai_writer.write_article(topic, angle, word_count, target, facts)
                 if r["ok"]:
-                    if r["title"]:
-                        st.text_input("标题", value=r["title"])
-                    st.text_area("初稿", value=r["body"], height=400)
-                    st.success("生成完成，可复制后自行修改。")
+                    st.session_state["draft_title"] = r["title"] or ""
+                    st.session_state["draft_body"] = r["body"]
+                    st.toast("初稿已生成，可在下方继续修改", icon="✍️")
                 else:
                     st.error(f"生成失败：{r['error']}")
+
+        # 初稿展示 + AI 修改（在表单外，支持反复修改）
+        if st.session_state.get("draft_body"):
+            st.divider()
+            st.markdown("#### 📄 当前稿件")
+            cur_title = st.text_input("标题", value=st.session_state["draft_title"], key="draft_title_in")
+            cur_body = st.text_area("正文", value=st.session_state["draft_body"], height=400, key="draft_body_in")
+            # 同步编辑后的值回 session_state，供 AI 修改读取
+            st.session_state["draft_title"] = cur_title
+            st.session_state["draft_body"] = cur_body
+
+            st.markdown("#### 🔧 AI 修改")
+            rev_instr = st.text_area(
+                "修改要求",
+                placeholder="如：把导语改得更有冲击力；增加一段人物对话；压缩到 500 字以内；语气更口语化…",
+                height=80,
+                key="rev_instr",
+            )
+            rc1, rc2 = st.columns([1, 3])
+            with rc1:
+                if st.button("🤖 AI 按要求修改", type="primary"):
+                    if not rev_instr.strip():
+                        st.warning("请先填写修改要求")
+                    else:
+                        with st.spinner("AI 正在修改..."):
+                            rr = ai_writer.revise_article(cur_title, cur_body, rev_instr)
+                        if rr["ok"]:
+                            st.session_state["draft_title"] = rr["title"]
+                            st.session_state["draft_body"] = rr["body"]
+                            st.toast("修改完成", icon="✅")
+                            st.rerun()
+                        else:
+                            st.error(f"修改失败：{rr['error']}")
+            with rc2:
+                if st.button("🗑 清空稿件"):
+                    st.session_state.pop("draft_title", None)
+                    st.session_state.pop("draft_body", None)
+                    st.rerun()
+            st.caption("提示：可直接在正文框手动编辑，再提修改要求让 AI 改；修改会覆盖当前稿件。")
     # ----- Tab 8: 使用说明 -----
 
     with sub_check:

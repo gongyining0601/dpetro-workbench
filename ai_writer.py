@@ -121,3 +121,71 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
         return _parse(data)
     except Exception as e:
         return {"title": "", "body": "", "ok": False, "error": str(e)}
+
+
+def revise_article(title: str, body: str, instruction: str) -> dict:
+    """基于已有初稿，按用户修改要求让 AI 改写。默认智谱 GLM，失败回退腾讯。"""
+    if not instruction.strip():
+        return {"title": title, "body": body, "ok": True, "error": ""}
+    user_msg = (
+        f"请根据修改要求改写以下新闻稿，保持新闻写作规范，段落间用换行分隔。\n\n"
+        f"修改要求：{instruction}\n\n"
+        f"原标题：{title}\n\n原正文：\n{body}\n\n"
+        f"请以 JSON 格式返回，字段为 title（修改后的标题）和 body（修改后的正文）。"
+    )
+
+    def _call(base: str, api_key: str, model: str) -> dict | None:
+        try:
+            resp = requests.post(
+                base,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": _sys_prompt()},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": min(len(body) * 2 + 500, 8192),
+                    "thinking": {"type": "disabled"},
+                },
+                timeout=90,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
+    def _parse(data: dict) -> dict:
+        content = data["choices"][0]["message"]["content"]
+        raw = _extract_json(content)
+        if raw:
+            parsed = json.loads(raw)
+            return {
+                "title": parsed.get("title", title) or title,
+                "body": parsed.get("body", content),
+                "ok": True,
+                "error": "",
+            }
+        return {"title": title, "body": content, "ok": True, "error": ""}
+
+    zp_key = config.ZHIPU_API_KEY
+    if zp_key:
+        data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
+        if data:
+            try:
+                return _parse(data)
+            except Exception:
+                pass
+
+    config.logger.info("ai_writer.revise: 智谱调用失败，回退腾讯云 deepseek")
+    tc_key = config.TENCENTCLOUD_API_KEY
+    if not tc_key:
+        return {"title": title, "body": body, "ok": False, "error": "智谱与腾讯云 Key 均未配置"}
+    data = _call(_TC_BASE, tc_key, _TC_MODEL)
+    if not data:
+        return {"title": title, "body": body, "ok": False, "error": "修改请求失败"}
+    try:
+        return _parse(data)
+    except Exception as e:
+        return {"title": title, "body": body, "ok": False, "error": str(e)}
