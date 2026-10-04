@@ -1,4 +1,4 @@
-"""礼貌爬虫：robots.txt 检查 + 节流 + 列表页/详情页解析。
+﻿"""礼貌爬虫：robots.txt 检查 + 节流 + 列表页/详情页解析。
 
 架构（2026-09-29 重构，按媒体源分派解析器）：
 - 中国石油报（epaper.cnpc.com.cn）：数字报是 SPA 单页应用，但 epaperObject JSON

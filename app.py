@@ -20,8 +20,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import base64
 from datetime import date, timedelta
+from urllib.parse import urlparse
 
+import requests
 import streamlit as st
 
 import config
@@ -50,6 +53,67 @@ def _normalize_display_url(url: str) -> str:
     if url.startswith("https://") and "ccin.com.cn" in url:
         return "http://" + url[len("https://"):]
     return url
+
+
+_IMG_CACHE: dict[str, str] = {}
+_MAX_IMG_BYTES = 3 * 1024 * 1024  # 单图 3MB 上限，避免超大图拖慢页面
+
+
+def _img_to_data_uri(url: str) -> str:
+    """服务端下载图片转 base64 data URI。
+
+    绕过 https 页面加载 http 图片的浏览器混合内容拦截，
+    同时处理中国石油报需 Referer、中国化工报证书异常等情况。
+    带内存缓存，避免重复下载。
+    """
+    if not url:
+        return ""
+    if url in _IMG_CACHE:
+        return _IMG_CACHE[url]
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        # 中国石油报需带 Referer 才能访问图片
+        if "cnpc.com.cn" in url:
+            parsed = urlparse(url)
+            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+        # 中国化工报 https 证书异常，统一走 http 并跳过证书校验
+        req_url = url
+        if "ccin.com.cn" in req_url:
+            req_url = req_url.replace("https://", "http://")
+            verify = False
+        else:
+            verify = True
+        resp = requests.get(req_url, headers=headers, timeout=15, verify=verify, stream=True)
+        if resp.status_code != 200:
+            _IMG_CACHE[url] = ""
+            return ""
+        content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
+        # 非图片内容（如重定向到 HTML 错误页）视为失败
+        if not content_type.startswith("image/"):
+            _IMG_CACHE[url] = ""
+            return ""
+        # 限制大小
+        content = resp.raw.read(_MAX_IMG_BYTES + 1)
+        if len(content) > _MAX_IMG_BYTES:
+            _IMG_CACHE[url] = ""
+            return ""
+        b64 = base64.b64encode(content).decode()
+        data_uri = f"data:{content_type};base64,{b64}"
+        _IMG_CACHE[url] = data_uri
+        return data_uri
+    except Exception:
+        _IMG_CACHE[url] = ""
+        return ""
+
+
+def _render_image(url: str):
+    """渲染单张远程图片：服务端下载转 base64，绕过 https 混合内容拦截。"""
+    u = _normalize_display_url(url)
+    data_uri = _img_to_data_uri(u)
+    if data_uri:
+        st.image(data_uri, width="stretch")
+    else:
+        st.caption("🖼️ 图片暂不可用（图源限制或已过期）")
 
 
 def _safe_anchor(label: str, url: str) -> str:
@@ -456,11 +520,7 @@ with tab_review:
                                 img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
                                 if img_urls:
                                     for u in img_urls[:5]:
-                                        u = _normalize_display_url(u)
-                                        try:
-                                            st.image(u, width="stretch")
-                                        except Exception:
-                                            st.markdown(f"![图片]({u})")
+                                        _render_image(u)
                             except (json.JSONDecodeError, TypeError):
                                 pass
                         st.write(r["summary"] or "（无摘要）")

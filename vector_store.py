@@ -1,4 +1,4 @@
-"""云端版向量存储：PG 表 article_embedding + 内存 numpy 暴力 cosine。
+﻿"""云端版向量存储：PG 表 article_embedding + 内存 numpy 暴力 cosine。
 
 2026-09-29 改造（方案 A 上云版）：
 - 旧版从本地 .npz 文件读写 → 改为从 PG 表 article_embedding 读写
