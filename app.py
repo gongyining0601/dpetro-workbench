@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import base64
 import hashlib
 from datetime import date, timedelta
@@ -62,6 +63,91 @@ _MAX_IMG_BYTES = 3 * 1024 * 1024  # 单图 3MB 上限，避免超大图拖慢页
 # 磁盘持久化缓存目录（Streamlit 重启后仍有效，避免重复下载）
 _IMG_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".img_cache")
 os.makedirs(_IMG_CACHE_DIR, exist_ok=True)
+# 缓存管理配置
+_CACHE_EXPIRE_DAYS = 30          # 缓存文件过期天数
+_CACHE_MAX_SIZE_MB = 500         # 缓存目录最大总大小（MB），超限删除最旧文件
+_CACHE_CLEANUP_INTERVAL_SEC = 3600  # 自动清理间隔（秒），避免每次请求都扫描
+
+
+def _cache_stats() -> dict:
+    """获取磁盘缓存统计信息。"""
+    try:
+        files = [f for f in os.listdir(_IMG_CACHE_DIR)
+                 if os.path.isfile(os.path.join(_IMG_CACHE_DIR, f))]
+        total_size = 0
+        oldest_mtime = None
+        for f in files:
+            fp = os.path.join(_IMG_CACHE_DIR, f)
+            size = os.path.getsize(fp)
+            total_size += size
+            mtime = os.path.getmtime(fp)
+            if oldest_mtime is None or mtime < oldest_mtime:
+                oldest_mtime = mtime
+        return {
+            "count": len(files),
+            "total_mb": round(total_size / (1024 * 1024), 2),
+            "oldest_days": round((time.time() - oldest_mtime) / 86400, 1) if oldest_mtime else 0,
+        }
+    except Exception:
+        return {"count": 0, "total_mb": 0, "oldest_days": 0}
+
+
+def _cleanup_expired_cache() -> int:
+    """清理过期缓存文件，返回删除的文件数。"""
+    now = time.time()
+    expire_sec = _CACHE_EXPIRE_DAYS * 86400
+    removed = 0
+    try:
+        for f in os.listdir(_IMG_CACHE_DIR):
+            fp = os.path.join(_IMG_CACHE_DIR, f)
+            if not os.path.isfile(fp):
+                continue
+            if now - os.path.getmtime(fp) > expire_sec:
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return removed
+
+
+def _enforce_cache_size_limit() -> int:
+    """缓存目录超限时删除最旧的文件，返回删除的文件数。"""
+    max_bytes = _CACHE_MAX_SIZE_MB * 1024 * 1024
+    try:
+        files = []
+        for f in os.listdir(_IMG_CACHE_DIR):
+            fp = os.path.join(_IMG_CACHE_DIR, f)
+            if os.path.isfile(fp):
+                files.append((fp, os.path.getmtime(fp), os.path.getsize(fp)))
+        total = sum(s for _, _, s in files)
+        if total <= max_bytes:
+            return 0
+        # 按修改时间从旧到新排序，删除最旧的直到达标
+        files.sort(key=lambda x: x[1])
+        removed = 0
+        for fp, _, size in files:
+            if total <= max_bytes:
+                break
+            try:
+                os.remove(fp)
+                total -= size
+                removed += 1
+            except Exception:
+                pass
+        return removed
+    except Exception:
+        return 0
+
+
+# 模块加载时执行一次过期清理 + 大小限制
+try:
+    _cleanup_expired_cache()
+    _enforce_cache_size_limit()
+except Exception:
+    pass
 
 
 def _disk_cache_key(url: str) -> str:
@@ -87,14 +173,26 @@ def _load_disk_cache(url: str) -> str | None:
         return None
 
 
+_last_cache_cleanup = 0.0  # 上次清理时间戳，避免频繁扫描
+
+
 def _save_disk_cache(url: str, data_uri: str):
-    """保存 base64 data URI 到磁盘缓存。"""
+    """保存 base64 data URI 到磁盘缓存，并定期检查大小限制。"""
     path = _disk_cache_path(url)
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(data_uri)
     except Exception:
-        pass
+        return
+    # 定期检查缓存大小（避免每次保存都扫描）
+    global _last_cache_cleanup
+    now = time.time()
+    if now - _last_cache_cleanup > _CACHE_CLEANUP_INTERVAL_SEC:
+        _last_cache_cleanup = now
+        try:
+            _enforce_cache_size_limit()
+        except Exception:
+            pass
 
 
 def _is_image_bytes(data: bytes) -> bool:
@@ -451,6 +549,41 @@ with st.sidebar:
         with c2:
             if st.button("取消", key="btn_cleanup_cancel", width="stretch"):
                 st.session_state.pop("_confirm_cleanup", None)
+                st.rerun()
+    # 图片缓存管理
+    st.divider()
+    st.subheader("🗄 图片缓存管理")
+    stats = _cache_stats()
+    st.caption(f"缓存文件：{stats['count']} 个 · 总大小：{stats['total_mb']} MB · "
+               f"最旧：{stats['oldest_days']} 天前 · 过期阈值：{_CACHE_EXPIRE_DAYS} 天 · "
+               f"上限：{_CACHE_MAX_SIZE_MB} MB")
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        if st.button("🧹 清理过期缓存", key="btn_clean_expired", width="stretch"):
+            n = _cleanup_expired_cache()
+            _enforce_cache_size_limit()
+            st.success(f"已清理 {n} 个过期缓存文件")
+    with cc2:
+        if st.button("🗑 清空全部缓存", key="btn_clear_all_cache", width="stretch"):
+            st.session_state["_confirm_clear_cache"] = True
+    if st.session_state.get("_confirm_clear_cache"):
+        st.warning("⚠️ 将删除所有图片缓存文件，下次访问需重新下载。确认继续？")
+        ccc1, ccc2 = st.columns(2)
+        with ccc1:
+            if st.button("✅ 确认清空", key="btn_clear_cache_confirm",
+                         type="primary", width="stretch"):
+                import shutil
+                try:
+                    shutil.rmtree(_IMG_CACHE_DIR)
+                    os.makedirs(_IMG_CACHE_DIR, exist_ok=True)
+                    _IMG_CACHE.clear()
+                    st.success("已清空全部图片缓存")
+                except Exception as e:
+                    st.error(f"清空失败：{e}")
+                st.session_state.pop("_confirm_clear_cache", None)
+        with ccc2:
+            if st.button("取消", key="btn_clear_cache_cancel", width="stretch"):
+                st.session_state.pop("_confirm_clear_cache", None)
                 st.rerun()
     # 手动爬取
     st.divider()
