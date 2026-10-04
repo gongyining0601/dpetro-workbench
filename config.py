@@ -24,20 +24,25 @@ load_dotenv()
 
 
 def _clean_key(raw: str) -> str:
-    """清洗 API key：去除首尾空白 + 移除常见不可见 Unicode 字符。
+    """清洗 API key：去除首尾空白、包裹引号、不可见 Unicode 字符、内部换行。
 
     Streamlit Cloud 等平台从网页复制密钥时可能混入不可见 Unicode 字符
-    （BOM、零宽空格等），导致 urllib3 用 latin-1 编码 HTTP header 时报
-    "'latin-1' codec can't encode characters"。
-    仅移除已知不可见字符，保留其余字符避免误删 key 本体。
+    （BOM、零宽空格等）或包裹引号，导致 urllib3 用 latin-1 编码 HTTP header
+    时报 "'latin-1' codec can't encode characters" 或 401 鉴权失败。
     """
     if not raw:
         return ""
     cleaned = raw.strip()
-    # 移除 BOM、零宽空格、零宽连接符等不可见字符
-    for ch in ("\ufeff", "\u200b", "\u200c", "\u200d", "\u2060", "\u00a0"):
+    # 移除包裹的引号（单/双）
+    if len(cleaned) >= 2 and (
+        (cleaned[0] == '"' and cleaned[-1] == '"') or
+        (cleaned[0] == "'" and cleaned[-1] == "'")
+    ):
+        cleaned = cleaned[1:-1]
+    # 移除 BOM、零宽空格、不间断空格、内部换行/制表符
+    for ch in ("\ufeff", "\u200b", "\u200c", "\u200d", "\u2060", "\u00a0", "\r", "\n", "\t"):
         cleaned = cleaned.replace(ch, "")
-    return cleaned
+    return cleaned.strip()
 
 
 # ---------- 访问密码开关 ----------
