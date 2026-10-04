@@ -18,8 +18,8 @@ _ZHIPU_BASE = config.ZHIPU_CHAT_URL
 _ZHIPU_MODEL = config.ZHIPU_CHAT_MODEL
 
 # 腾讯云后备（原方案）
-_TC_BASE = "https://tokenhub.tencentmaas.com/v1/chat/completions"
-_TC_MODEL = "deepseek-v4-flash-202605"
+_TC_BASE = config.TENCENTCLOUD_CHAT_URL
+_TC_MODEL = config.TENCENTCLOUD_CHAT_MODEL
 
 
 def _extract_json(text: str) -> str | None:
@@ -100,7 +100,7 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
         return {"title": "", "body": content, "ok": True, "error": ""}
 
     # 1) 主力：智谱 GLM（免费）
-    zp_key = os.getenv("ZHIPU_API_KEY", "")
+    zp_key = config.ZHIPU_API_KEY
     if zp_key:
         data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
         if data:
@@ -111,7 +111,7 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
 
     # 2) 后备：腾讯云 deepseek（原方案）
     config.logger.info("ai_writer: 智谱调用失败或未配 Key，回退到腾讯云 deepseek")
-    tc_key = os.getenv("TENCENTCLOUD_API_KEY", "")
+    tc_key = config.TENCENTCLOUD_API_KEY
     if not tc_key:
         return {"title": "", "body": "", "ok": False, "error": "智谱与腾讯云 Key 均未配置"}
     data = _call(_TC_BASE, tc_key, _TC_MODEL)
