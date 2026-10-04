@@ -12,6 +12,8 @@
 6. 使用说明   —— 操作指南
 
 投稿记录功能在第 3 个 tab 同屏管理（与命中率一起看）。
+
+2026-10-03 新增：访问密码登录门控（auth.py）。首次使用需设置密码，之后每次访问需登录。
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import streamlit as st
 
 import config
 import db
+import auth
 import calendar_engine
 import topic_matcher
 import draft_checker
@@ -39,20 +42,68 @@ def _md_escape(s: str) -> str:
     return re.sub(r"([\\*_{}\[\]()#+.\!|>])", r"\\\1", str(s))
 
 
+def _normalize_display_url(url: str) -> str:
+    """渲染前规范化 URL：ccin.com.cn 的 https 统一转 http，避免浏览器 SSL 警告。"""
+    if not url:
+        return url
+    if url.startswith("https://") and "ccin.com.cn" in url:
+        return "http://" + url[len("https://"):]
+    return url
+
+
 def _safe_anchor(label: str, url: str) -> str:
     """生成安全的 markdown 链接文本，仅允许 http/https 协议。"""
-    safe_url = (url or "").strip()
+    safe_url = _normalize_display_url((url or "").strip())
     if not safe_url.startswith(("http://", "https://")):
         return f"{_md_escape(label)}：{_md_escape(safe_url)}"
     return f"[{_md_escape(label)}]({safe_url})"
 
+
+# ==================== 性能优化：缓存包装 ====================
+# 2026-10-03 新增：用 Streamlit 缓存减少重复数据库查询
+# - init_db: 整个会话只执行一次（建表是幂等的）
+# - 读查询: ttl 缓存，写操作后手动清空
+@st.cache_resource
+def _init_db_cached():
+    db.init_db()
+
+
+@st.cache_data(ttl=30)
+def _stats_overview_cached():
+    return db.stats_overview()
+
+
+@st.cache_data(ttl=10)
+def _fetch_unreviewed_cached(limit=30):
+    return db.fetch_unreviewed(limit=limit)
+
+
+@st.cache_data(ttl=10)
+def _fetch_reviewed_cached(limit=200):
+    return db.fetch_reviewed(limit=limit)
+
+
+@st.cache_data(ttl=10)
+def _fetch_image_articles_cached(limit=200):
+    return db.fetch_image_articles(limit)
+
+
+def _invalidate_caches():
+    """审核/删除/投稿等写操作后调用，清空所有数据缓存，确保列表立即刷新。"""
+    _stats_overview_cached.clear()
+    _fetch_unreviewed_cached.clear()
+    _fetch_reviewed_cached.clear()
+    _fetch_image_articles_cached.clear()
+
+
 st.title("🧭 行者")
 
 # 启动时初始化数据库（带重试：连接池失效时用户可点击重试恢复）
+# 用 @st.cache_resource 保证整个会话只跑一次，避免每次交互都查库建表
 _db_ok = False
 for _attempt in range(2):  # 自动重试1次（连接池可能刚重建）
     try:
-        db.init_db()
+        _init_db_cached()
         _db_ok = True
         break
     except Exception as e:
@@ -64,17 +115,70 @@ if not _db_ok:
         st.rerun()
     st.stop()
 
-# 清理过期未审核稿件（非阻塞：失败不影响审核台使用，只记日志）
-try:
-    _cleaned = db.cleanup_old_unreviewed()
-    if _cleaned:
-        config.logger.info(f"启动时清理 {_cleaned} 条过期未审核稿件")
-except Exception as _e:
-    config.logger.warning(f"cleanup_old_unreviewed 失败（不影响审核台使用）: {_e}")
+
+# ---------------- 访问密码登录门控 ----------------
+# AUTH_ENABLED=False 时跳过登录（本地调试用）
+if config.AUTH_ENABLED:
+    _authed = st.session_state.get("authenticated", False)
+
+    if not _authed:
+        _has_pw = auth.has_access_password()
+
+        if not _has_pw:
+            # 首次使用：设置访问密码
+            st.info("🔐 首次使用，请设置访问密码（整个应用只有一个密码，务必牢记）。")
+            with st.form("set_password_form", clear_on_submit=True):
+                _pw1 = st.text_input("设置访问密码", type="password", placeholder="至少 4 位")
+                _pw2 = st.text_input("确认密码", type="password")
+                _set_submitted = st.form_submit_button("✅ 设置密码", type="primary")
+            if _set_submitted:
+                if not _pw1:
+                    st.error("密码不能为空")
+                elif _pw1 != _pw2:
+                    st.error("两次输入的密码不一致")
+                else:
+                    try:
+                        auth.set_access_password(_pw1)
+                        st.session_state["authenticated"] = True
+                        st.success("密码设置成功，已自动登录")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+            st.stop()
+
+        else:
+            # 已有密码：登录
+            with st.form("login_form", clear_on_submit=True):
+                _pw = st.text_input("🔐 请输入访问密码", type="password")
+                _login_submitted = st.form_submit_button("登录", type="primary")
+            if _login_submitted:
+                if auth.verify_access_password(_pw):
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("密码错误")
+            st.caption("提示：忘记密码需联系管理员重置（清空 app_setting 表中 access_password 记录）。")
+            st.stop()
+# ---------------- 登录门控结束 ----------------
+
+
+import time as _time
+
+# 清理过期未审核稿件（每 5 分钟跑一次，避免每次交互都查库）
+# 非阻塞：失败不影响审核台使用，只记日志
+_CLEANUP_INTERVAL = 300  # 5 分钟
+_last_cleanup = st.session_state.get("_last_cleanup_time", 0)
+if (_time.time() - _last_cleanup) > _CLEANUP_INTERVAL:
+    try:
+        _cleaned = db.cleanup_old_unreviewed()
+        st.session_state["_last_cleanup_time"] = _time.time()
+        if _cleaned:
+            config.logger.info(f"清理 {_cleaned} 条过期未审核稿件")
+    except Exception as _e:
+        config.logger.warning(f"cleanup_old_unreviewed 失败（不影响审核台使用）: {_e}")
 
 # 向量索引同步：用 session_state 缓存，避免每次 rerun 都调 embedding API
 # 审核操作后会置 _force_vec_sync=True 强制同步；否则每 VEC_SYNC_INTERVAL 秒同步一次
-import time as _time
 _VEC_SYNC_INTERVAL = 60  # 秒
 _force = st.session_state.get("_force_vec_sync", False)
 _last = st.session_state.get("_vec_sync_time", 0)
@@ -93,7 +197,7 @@ st.session_state["_vec_sync_stats"] = _chroma_stats
 # ---------------- 侧边状态 ----------------
 with st.sidebar:
     st.subheader("📊 库存概览")
-    s = db.stats_overview()
+    s = _stats_overview_cached()
     for k, v in s.items():
         st.metric(k, v)
     st.divider()
@@ -115,6 +219,34 @@ with st.sidebar:
         st.caption("嵌入：BAAI/bge-large-zh-v1.5（Silicon Flow API）")
         if _chroma_stats.get("error"):
             st.caption(f"⚠️ 同步警告：{_chroma_stats['error']}")
+    st.divider()
+    st.subheader("🧹 数据维护")
+    if st.button("清理历史非图片新闻", key="btn_cleanup_nonphoto", width="stretch"):
+        st.session_state["_confirm_cleanup"] = True
+        st.rerun()
+    if st.session_state.get("_confirm_cleanup"):
+        st.warning("⚠️ 将删除 has_image=FALSE 或 body_text >300 字的稿件，不可恢复。")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ 确认清理", key="btn_cleanup_confirm", type="primary", width="stretch"):
+                try:
+                    n = db.cleanup_non_photo_news()
+                    st.success(f"已清理 {n} 条非图片新闻稿件")
+                    _invalidate_caches()
+                except Exception as e:
+                    st.error(f"清理失败：{e}")
+                st.session_state.pop("_confirm_cleanup", None)
+                st.rerun()
+        with c2:
+            if st.button("取消", key="btn_cleanup_cancel", width="stretch"):
+                st.session_state.pop("_confirm_cleanup", None)
+                st.rerun()
+    # 退出登录
+    if config.AUTH_ENABLED and st.session_state.get("authenticated"):
+        st.divider()
+        if st.button("🚪 退出登录", key="btn_logout", width="stretch"):
+            st.session_state.pop("authenticated", None)
+            st.rerun()
 
 
 # ---------------- 图文素材上传配置 ----------------
@@ -129,80 +261,177 @@ tab_review, tab_history, tab_calendar, tab_material, tab_writing, tab_help = st.
 )
 
 
-# ----- Tab 1: 今日审核 -----
+# ----- Tab 1: 今日审核（批量 checkbox 审核 UI） -----
+def _do_review_batch(article_ids, decision):
+    """批量审核：连接断开时自动重建池并重试一次。返回 (是否成功, 影响行数)。"""
+    import psycopg2 as _pg
+    try:
+        n = db.set_review_batch(article_ids, decision)
+        return True, n
+    except (_pg.OperationalError, _pg.InterfaceError):
+        db._reset_pool()
+        try:
+            n = db.set_review_batch(article_ids, decision)
+            return True, n
+        except Exception:
+            return False, 0
+    except Exception:
+        return False, 0
+
+
+def _clear_selection(ids):
+    """清空选中状态（批量操作后调用）。"""
+    for aid in ids:
+        st.session_state.pop(f"chk_{aid}", None)
+    # 不能直接设 chk_all=False（widget 已实例化会报错），
+    # 用 pop 移除该 key，rerun 后 checkbox 会以默认值 False 重建。
+    st.session_state.pop("chk_all", None)
+
+
 with tab_review:
     st.subheader("今日新稿（5 分钟审核法）")
-    st.caption("点击「相关 / 借鉴 / 无关」即记录一次审核；只看摘要点开详情。")
-    rows = db.fetch_unreviewed(limit=30)
+    st.caption("勾选多条 → 顶部「批量保存/删除」一次处理；保存=入资料库，删除=直接清理。")
+    rows = _fetch_unreviewed_cached(limit=30)
     if not rows:
         st.info("暂无待审稿件。运行 `python crawler.py` 拉取，或确认 config.py 已填栏目 URL。")
-    for r in rows:
-        with st.container(border=True):
-            cols = st.columns([5, 2, 2, 2])
-            with cols[0]:
-                st.markdown(f"**{_md_escape(r['title'])}**")
-                st.caption(
-                    f"{r['source_name']} · {r['column_name']} · "
-                    f"{r['publish_date'] or '日期不详'} · 作者: {r['author'] or '不详'}"
-                )
-                with st.expander("摘要 / 详情"):
-                    st.write(r["summary"] or "（无摘要）")
-                    if r["body_text"]:
-                        st.text_area("正文预览（前 500 字）",
-                                     r["body_text"][:500], height=160,
-                                     disabled=True, key=f"body_{r['id']}")
-                    st.markdown(_safe_anchor("原文链接", r['url']))
-            def _do_review(article_id, decision):
-                """审核操作：连接断开时自动重建池并重试一次。"""
-                import psycopg2 as _pg
-                try:
-                    db.set_review(article_id, decision)
-                    return True
-                except (_pg.OperationalError, _pg.InterfaceError):
-                    db._reset_pool()
-                    try:
-                        db.set_review(article_id, decision)
-                        return True
-                    except Exception:
-                        return False
-                except Exception:
-                    return False
+    else:
+        all_ids = [r["id"] for r in rows]
 
-            with cols[1]:
-                if st.button("相关", key=f"rel_{r['id']}", type="primary"):
-                    if _do_review(r["id"], "相关"):
-                        st.session_state["_force_vec_sync"] = True
-                        st.toast("已标「相关」", icon="✅")
+        # 全选 on_change 回调：同步所有 chk_{id} session_state
+        def _toggle_all(*_):
+            v = st.session_state.get("chk_all", False)
+            for aid in all_ids:
+                st.session_state[f"chk_{aid}"] = v
+
+        # 顶部工具栏：全选 + 批量按钮
+        tool_cols = st.columns([1, 1.5, 1.5, 3])
+        with tool_cols[0]:
+            st.checkbox("全选", key="chk_all", on_change=_toggle_all)
+        # 实时统计选中数（从 session_state 读，全选 on_change 已同步过）
+        selected_ids = [aid for aid in all_ids if st.session_state.get(f"chk_{aid}", False)]
+        n_sel = len(selected_ids)
+        with tool_cols[1]:
+            if st.button(f"💾 批量保存({n_sel})", key="btn_batch_save",
+                         type="primary", disabled=(n_sel == 0), width="stretch"):
+                ok, n = _do_review_batch(selected_ids, "保存")
+                if ok:
+                    st.session_state["_force_vec_sync"] = True
+                    st.toast(f"已批量保存 {n} 条", icon="📁")
+                    _clear_selection(selected_ids)
+                    _invalidate_caches()
+                else:
+                    st.error("连接失败，请重试")
+                st.rerun()
+        with tool_cols[2]:
+            if st.button(f"🗑 批量删除({n_sel})", key="btn_batch_del",
+                         disabled=(n_sel == 0), width="stretch"):
+                st.session_state["_pending_del_ids"] = list(selected_ids)
+                st.rerun()
+        with tool_cols[3]:
+            pass  # 占位
+
+        # 删除二次确认
+        if st.session_state.get("_pending_del_ids"):
+            pending = st.session_state["_pending_del_ids"]
+            st.warning(f"⚠️ 确认删除 {len(pending)} 条？删除不可恢复。")
+            conf_cols = st.columns([1, 1, 4])
+            with conf_cols[0]:
+                if st.button("✅ 确认删除", key="btn_confirm_del", type="primary", width="stretch"):
+                    ok, n = _do_review_batch(pending, "删除")
+                    if ok:
+                        st.toast(f"已批量删除 {n} 条", icon="🗑")
+                        _clear_selection(pending)
+                        _invalidate_caches()
                     else:
                         st.error("连接失败，请重试")
+                    st.session_state.pop("_pending_del_ids", None)
                     st.rerun()
-            with cols[2]:
-                if st.button("借鉴", key=f"bor_{r['id']}"):
-                    if _do_review(r["id"], "借鉴"):
-                        st.session_state["_force_vec_sync"] = True
-                        st.toast("已标「借鉴」", icon="💡")
-                    else:
-                        st.error("连接失败，请重试")
+            with conf_cols[1]:
+                if st.button("取消", key="btn_cancel_del", width="stretch"):
+                    st.session_state.pop("_pending_del_ids", None)
                     st.rerun()
-            with cols[3]:
-                if st.button("无关", key=f"irr_{r['id']}"):
-                    if _do_review(r["id"], "无关"):
-                        st.session_state["_force_vec_sync"] = True
-                        st.toast("已标「无关」", icon="🚫")
-                    else:
-                        st.error("连接失败，请重试")
-                    st.rerun()
+
+        # 渲染每条稿件
+        for r in rows:
+            with st.container(border=True):
+                cols = st.columns([0.4, 9.6])
+                with cols[0]:
+                    st.checkbox("选", key=f"chk_{r['id']}")
+                with cols[1]:
+                    st.markdown(f"**{_md_escape(r['title'])}**")
+                    st.caption(
+                        f"{r['source_name']} · {r['column_name']} · "
+                        f"{r['publish_date'] or '日期不详'} · 作者: {r['author'] or '不详'}"
+                    )
+                    with st.expander("摘要 / 详情"):
+                        # 展示图片（image_urls 是 JSON 字符串数组）
+                        img_urls_raw = r.get("image_urls")
+                        if img_urls_raw:
+                            try:
+                                img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
+                                if img_urls:
+                                    for u in img_urls[:5]:
+                                        u = _normalize_display_url(u)
+                                        try:
+                                            st.image(u, width="stretch")
+                                        except Exception:
+                                            st.markdown(f"![图片]({u})")
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        st.write(r["summary"] or "（无摘要）")
+                        if r["body_text"]:
+                            st.text_area("正文预览（前 500 字）",
+                                         r["body_text"][:500], height=160,
+                                         disabled=True, key=f"body_{r['id']}")
+                        st.markdown(_safe_anchor("原文链接", r['url']))
+                        # 单条操作按钮
+                        act_cols = st.columns([1, 1, 4])
+                        with act_cols[0]:
+                            if st.button("💾 保存", key=f"save_{r['id']}",
+                                         type="primary", width="stretch"):
+                                try:
+                                    db.set_review(r["id"], "保存")
+                                    st.session_state["_force_vec_sync"] = True
+                                    _invalidate_caches()
+                                    st.toast("已保存", icon="📁")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"保存失败：{e}")
+                        with act_cols[1]:
+                            if st.button("🗑 删除", key=f"del_{r['id']}",
+                                         width="stretch"):
+                                st.session_state["_pending_del_single"] = r["id"]
+                                st.rerun()
+            # 单条删除二次确认
+            if st.session_state.get("_pending_del_single") == r["id"]:
+                st.warning(f"⚠️ 确认删除「{r['title'][:30]}…」？删除不可恢复。")
+                conf = st.columns([1, 1, 8])
+                with conf[0]:
+                    if st.button("✅ 确认删", key=f"cfm_del_{r['id']}",
+                                 type="primary", width="stretch"):
+                        try:
+                            db.set_review(r["id"], "删除")
+                            _invalidate_caches()
+                            st.toast("已删除", icon="🗑")
+                        except Exception as e:
+                            st.error(f"删除失败：{e}")
+                        st.session_state.pop("_pending_del_single", None)
+                        st.rerun()
+                with conf[1]:
+                    if st.button("取消", key=f"cancel_del_{r['id']}", width="stretch"):
+                        st.session_state.pop("_pending_del_single", None)
+                        st.rerun()
 
 
 # ----- Tab 2: 历史已审 -----
 with tab_history:
     st.subheader("已审稿件")
-    rows = db.fetch_reviewed(limit=200)
+    rows = _fetch_reviewed_cached(limit=200)
     if not rows:
         st.info("还没有审核记录。去「今日审核」审几篇试试。")
     else:
         for r in rows:
-            tag = {"相关": "🟢 相关", "借鉴": "💡 借鉴", "无关": "🚫 无关"}.get(r["decision"], r["decision"])
+            tag = {"保存": "📁 保存"}.get(r["decision"], r["decision"])
             with st.expander(f"{tag} | {r['title']} | {r['source_name']}/{r['column_name']}"):
                 if r.get("publish_date"):
                     st.caption(f"发布日期：{r['publish_date']}  |  审核时间：{r['reviewed_at']}")
@@ -211,6 +440,29 @@ with tab_history:
                     st.markdown(_md_escape(r["body_text"]))
                 else:
                     st.info("（无正文内容）")
+                # 删除按钮（从已审库中移除）
+                if st.button("🗑 删除此稿件", key=f"hist_del_{r['id']}", width="stretch"):
+                    st.session_state["_pending_hist_del"] = r["id"]
+                    st.rerun()
+            # 历史删除二次确认
+            if st.session_state.get("_pending_hist_del") == r["id"]:
+                st.warning(f"⚠️ 确认从资料库删除「{r['title'][:30]}…」？删除不可恢复。")
+                hconf = st.columns([1, 1, 8])
+                with hconf[0]:
+                    if st.button("✅ 确认删", key=f"hist_cfm_{r['id']}",
+                                 type="primary", width="stretch"):
+                        try:
+                            db.set_review(r["id"], "删除")
+                            _invalidate_caches()
+                            st.toast("已从资料库删除", icon="🗑")
+                        except Exception as e:
+                            st.error(f"删除失败：{e}")
+                        st.session_state.pop("_pending_hist_del", None)
+                        st.rerun()
+                with hconf[1]:
+                    if st.button("取消", key=f"hist_cancel_{r['id']}", width="stretch"):
+                        st.session_state.pop("_pending_hist_del", None)
+                        st.rerun()
 
 
 # ----- Tab 3: 常规日历 + 投稿记录 -----
@@ -264,6 +516,7 @@ with tab_calendar:
                         (topic, media, col or None, db.now_iso(), result, note or None),
                     )
                 st.success("已保存")
+                _invalidate_caches()
                 st.rerun()
             except Exception as e:
                 st.error(f"保存失败：{e}")
@@ -358,7 +611,7 @@ with tab_material:
                 cols = st.columns(min(len(saved), 4))
                 for i, p in enumerate(saved):
                     with cols[i % len(cols)]:
-                        st.image(p, caption=os.path.basename(p), use_container_width=True)
+                        st.image(p, caption=os.path.basename(p), width="stretch")
             if errors:
                 st.error("以下文件上传失败：")
                 for e in errors:
@@ -393,7 +646,7 @@ with tab_material:
                         sel_key = f"sel_{page}_{i}_{os.path.basename(p)}"
                         sel_keys.append((sel_key, p))
                         with cols[j]:
-                            st.image(p, use_container_width=True)
+                            st.image(p, width="stretch")
                             st.caption(f"📄 {os.path.basename(p)}")
                             st.caption(
                                 f"{os.path.getsize(p) // 1024} KB · "
@@ -461,7 +714,7 @@ with tab_material:
             else:
                 st.info("暂无已上传图片。先在上面上传几张试试。")
 
-        imgs = db.fetch_image_articles(200)
+        imgs = _fetch_image_articles_cached(200)
         st.metric("图文稿件", len(imgs))
         for a in imgs:
             with st.expander(f"[{a['source_name']}/{a['column_name']}] {a['title']}", expanded=False):
@@ -473,8 +726,9 @@ with tab_material:
                         img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
                         if img_urls:
                             for u in img_urls[:5]:
+                                u = _normalize_display_url(u)
                                 try:
-                                    st.image(u, use_container_width=True)
+                                    st.image(u, width="stretch")
                                 except Exception:
                                     st.markdown(f"![图片]({u})")
                     except (json.JSONDecodeError, TypeError):
@@ -484,9 +738,10 @@ with tab_material:
                 if a.get("body_text"):
                     st.markdown(_md_escape(a["body_text"][:1000]))
                 if a.get("url"):
-                    st.markdown(f"[原文链接]({_safe_anchor(a['url'])})")
+                    st.markdown(_safe_anchor("原文链接", a["url"]))
 
     
+
 
 # ----- Tab 5: 撰稿中心（行者撰稿 + 成稿体检）-----
 with tab_writing:
@@ -574,6 +829,7 @@ with tab_writing:
 
     
 
+
 with tab_help:
     st.subheader("🧭 行者 · 使用说明")
 
@@ -581,6 +837,16 @@ with tab_help:
 ### 🎯 软件定位
 
 **行者** 是锦州石化新闻投稿辅助工具，覆盖 **找选题 → 写稿 → 体检 → 投稿记录** 全流程。
+
+---
+
+### 🔐 访问密码
+
+首次打开应用时，系统会提示设置**访问密码**（整个应用只有一个密码）。
+设置后每次访问都需要输入密码登录。
+
+- **忘记密码**：需在数据库中执行 `DELETE FROM app_setting WHERE key='access_password';` 清空，重启后重新设置。
+- **本地调试跳过登录**：在 `.env` 中设置 `AUTH_ENABLED=0`。
 
 ---
 

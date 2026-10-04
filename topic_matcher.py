@@ -1,4 +1,4 @@
-"""选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
+﻿"""选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
 
 2026-09-29 改造（方案 A 上云版）：
 - 嵌入从本地 bge（sentence-transformers + torch）改为 Silicon Flow 免费 API
@@ -6,7 +6,7 @@
   - 不占 1GB RAM（torch/sentence-transformers 已从 requirements 去掉）
   - 失败时自动回退关键词字符串包含打分（原 MVP 逻辑）
 - 向量存储: vector_store.NumpyVectorStore（PG 表 article_embedding 读写 + 内存 numpy cosine）
-- 索引范围: 只对 review_record decision='相关'或'借鉴' 的稿件建向量
+- 索引范围: 只对 review_record decision='保存' 的稿件建向量
 - 同步: ensure_index_synced() 增量 upsert；decision 变'无关'自动从索引删
 - 兜底: Silicon Flow API 调用失败 / 索引空 → 回退关键词字符串包含打分
 
@@ -96,7 +96,7 @@ def _doc_text(title: str, body: str) -> str:
 
 
 def _fetch_reviewed_articles():
-    """拉 PG 中 decision='相关'/'借鉴' 的稿件（建索引候选集）。"""
+    """拉 PG 中 decision='保存' 的稿件（建索引候选集）。"""
     with db.get_conn() as c:
         cur = db.conn_cursor(c)
         cur.execute(
@@ -106,7 +106,7 @@ def _fetch_reviewed_articles():
             "JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
             "LEFT JOIN media_source s ON s.id = c.source_id "
-            "WHERE r.decision IN ('相关','借鉴')"
+            "WHERE r.decision='保存'"
         )
         return cur.fetchall()
 
@@ -282,6 +282,7 @@ def _match_keywords(keywords: list[str], top_k: int) -> list[dict]:
             "JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
             "LEFT JOIN media_source s ON s.id = c.source_id "
+            "WHERE r.decision='保存' "
             "ORDER BY r.reviewed_at DESC LIMIT 1000"
         )
         rows = cur.fetchall()

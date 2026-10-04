@@ -24,6 +24,10 @@ from urllib.robotparser import RobotFileParser
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.exceptions import InsecureRequestWarning
+
+# 证书域名不匹配的站点统一走 http（见 _normalize_url），无需 verify=False
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 from bs4 import BeautifulSoup
 
 import ai_filter
@@ -51,6 +55,7 @@ class ArticleContent:
 # ---------------- 网络层 ----------------
 
 _session: requests.Session | None = None
+_session_no_ssl: requests.Session | None = None
 
 
 def get_session() -> requests.Session:
@@ -71,20 +76,79 @@ def get_session() -> requests.Session:
     return _session
 
 
+def get_session_no_ssl() -> requests.Session:
+    """不校验 SSL 的 Session（备用，当前所有站点走 http，暂未使用）。
+
+    不挂 Retry 适配器，SSL 失败立即返回，避免 3 次重试+退避拖慢爬虫。
+    """
+    global _session_no_ssl
+    if _session_no_ssl is None:
+        _session_no_ssl = requests.Session()
+        _session_no_ssl.headers.update({"User-Agent": config.USER_AGENT})
+        _session_no_ssl.verify = False
+    return _session_no_ssl
+
+
+def _need_no_ssl(url: str) -> bool:
+    """判断 URL 是否需要跳过 SSL 校验。
+
+    ccin.com.cn 已统一用 http（config.py），不再需要 verify=False。
+    此函数保留给未来其他 SSL 有问题的站点使用。
+    """
+    return False
+
+
+def _detect_encoding(r, url: str = "") -> str:
+    """三级编码探测，解决党报数字报乱码问题。
+
+    优先级：
+    1. HTML <meta charset> 标签（最可靠，页面作者声明）
+    2. Content-Type 响应头 charset
+    3. requests apparent_encoding（chardet 探测）
+    4. 按域名兜底：人民日报/辽宁日报 → gbk，中国化工报 → utf-8
+    """
+    # 1. 从 HTML meta 标签读取 charset
+    m = re.search(rb'<meta[^>]+charset\s*=\s*["\']?([\w-]+)', r.content[:2000], re.I)
+    if m:
+        enc = m.group(1).decode("ascii", errors="ignore").lower()
+        if enc in ("gbk", "gb2312", "gb18030", "utf-8", "utf8"):
+            return enc
+    # 2. Content-Type 响应头
+    if r.encoding and r.encoding.lower() not in ("iso-8859-1", "ascii"):
+        return r.encoding
+    # 3. chardet 探测
+    if r.apparent_encoding:
+        enc = r.apparent_encoding.lower()
+        if enc in ("gbk", "gb2312", "gb18030", "utf-8", "utf8"):
+            return enc
+    # 4. 按域名兜底
+    domain = urlparse(url).netloc.lower() if url else ""
+    if any(d in domain for d in ("people.com.cn", "lnd.com.cn")):
+        return "gbk"
+    if "ccin.com.cn" in domain:
+        return "utf-8"
+    return "utf-8"
+
+
 def fetch(url: str) -> str | None:
-    """GET 一个 URL，返回文本或 None。失败优雅返回。"""
+    """GET 一个 URL，返回文本或 None。失败优雅返回。
+
+    所有站点统一走 http（config.py），默认用普通 session（verify=True）。
+    编码探测增强：优先 meta charset，避免党报 GBK 页面被误判为 ISO-8859-1 导致乱码。
+    """
+    sess = get_session_no_ssl() if _need_no_ssl(url) else get_session()
     try:
-        r = get_session().get(url, timeout=config.REQUEST_TIMEOUT)
-        if r.status_code != 200:
-            print(f"  [跳过] {url} HTTP {r.status_code}")
-            return None
-        # 党报数字报常见编码 gbk/utf-8 混杂；优先用响应头，失败回退 utf-8
-        if r.encoding is None or r.encoding.lower() == "iso-8859-1":
-            r.encoding = r.apparent_encoding or "utf-8"
-        return r.text
+        r = sess.get(url, timeout=config.REQUEST_TIMEOUT)
     except requests.RequestException as e:
         print(f"  [错误] {url} -> {e}")
         return None
+    if r.status_code != 200:
+        print(f"  [跳过] {url} HTTP {r.status_code}")
+        return None
+    # 三级编码探测：meta charset > 响应头 > chardet > 域名兜底
+    enc = _detect_encoding(r, url)
+    r.encoding = enc
+    return r.text
 
 
 # ---------------- robots.txt ----------------
@@ -104,7 +168,8 @@ def robots_allows(url: str) -> bool:
     if base not in _robots_cache:
         rp = RobotFileParser()
         try:
-            r = get_session().get(
+            sess = get_session_no_ssl() if _need_no_ssl(url) else get_session()
+            r = sess.get(
                 urljoin(base, "/robots.txt"), timeout=config.REQUEST_TIMEOUT
             )
             body = r.text or ""
@@ -140,19 +205,105 @@ def clean_html_text(html: str) -> str:
     return BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
 
 
+def extract_caption_or_short(soup, body_text: str) -> str:
+    """提取图片新闻的「照片说明+短文字」，弃长正文。
+
+    优先级：
+    1. <img> 的 alt/title 属性（图注，最准）
+    2. 图注容器：figcaption / .pic-caption / .pictext / .caption 等
+    3. 兜底：正文首段 ≤200 字
+    """
+    captions = []
+    # 1. img alt/title
+    for img in soup.find_all("img"):
+        for attr in ("alt", "title"):
+            v = (img.get(attr) or "").strip()
+            if len(v) >= 4 and v not in captions:
+                captions.append(v)
+    # 2. 图注容器
+    for sel in (
+        "figcaption",
+        "p[class*=caption]", "p[class*=pic]", "p[class*=img]",
+        "div[class*=caption]", "div[class*=pic]", "div[class*=img]",
+        "span[class*=caption]",
+    ):
+        try:
+            for el in soup.select(sel):
+                t = el.get_text(strip=True)
+                if len(t) >= 4 and t not in captions:
+                    captions.append(t)
+        except Exception:
+            pass
+    if captions:
+        return "；".join(captions)
+    # 3. 兜底：首段 ≤200 字
+    if body_text:
+        first = body_text.split("\n")[0].strip()
+        if first:
+            return first[:200]
+    return (body_text or "")[:200]
+
+
+def classify_article(src_name: str, col_name: str, title: str, body_text: str = "") -> str | None:
+    """判定文章是否属于 5 类之一。返回类别名或 None（不属于则丢弃）。
+
+    主路径：CATEGORY_MAP 按「源/栏目」精确匹配（零 API 成本）
+    兜底：标题关键词匹配
+    """
+    sc = f"{src_name}/{col_name}"
+    # 主路径
+    for cat, sc_set in config.CATEGORY_MAP.items():
+        if sc in sc_set:
+            return cat
+    # 兜底：标题关键词
+    blob = f"{title} {body_text[:100]}"
+    for cat, kws in config.CATEGORY_KEYWORDS.items():
+        for kw in kws:
+            if kw in blob:
+                return cat
+    return None
+
+
+# ---------------- URL 规范化（SSL 证书不匹配的域名 https→http） ----------------
+
+# 这些域名的 SSL 证书与主机名不匹配，浏览器加载时报错；HTTP 可正常访问，统一改写。
+_SSL_BROKEN_DOMAINS = ("ccin.com.cn",)
+
+
+def _normalize_url(url: str) -> str:
+    """把 SSL 证书有问题的域名的 https 改成 http，避免浏览器控制台 SSL 警告。"""
+    if not url or not url.startswith("https://"):
+        return url
+    for domain in _SSL_BROKEN_DOMAINS:
+        if domain in url:
+            return "http://" + url[len("https://"):]
+    return url
+
+
+def _lookback_days(n: int = 7) -> list[date]:
+    """返回最近 n 天的日期列表（含今天），用于党报休刊期回溯抓取。"""
+    today = date.today()
+    return [today - timedelta(days=i) for i in range(n)]
+
+
 # ---------------- 兜底启发式（保留给未来媒体） ----------------
 
 def extract_links(html: str, base_url: str) -> list[ArticleLink]:
-    """兜底：从列表页提取文章链接。取所有外链到详情页的 <a>。"""
+    """兜底：从列表页提取文章链接。只保留文章类 URL，过滤分类页/导航链接。"""
     soup = BeautifulSoup(html, "html.parser")
     links: list[ArticleLink] = []
     seen: set[str] = set()
+    # 文章 URL 特征：含 /detail/ /content/ /news/ /article/ 或数字ID
+    article_re = re.compile(r"(/detail/|/content/|/news/|/article/|/\d{6,})", re.I)
     for a in soup.find_all("a", href=True):
         title = a.get_text(strip=True)
         if not title or len(title) < 4:
             continue
         href = urljoin(base_url, a["href"])
         if href == base_url or href.endswith("/"):
+            continue
+        # 只保留文章类 URL
+        if not article_re.search(href):
             continue
         if href in seen:
             continue
@@ -163,22 +314,123 @@ def extract_links(html: str, base_url: str) -> list[ArticleLink]:
 
 
 
-def _extract_image_urls(soup) -> tuple[bool, str | None]:
-    """从 BeautifulSoup 对象提取所有 img 的 src，返回 (是否有图, JSON字符串)。"""
+def _extract_image_urls(soup, base_url: str = "") -> tuple[bool, str | None]:
+    """从 BeautifulSoup 对象提取所有 img 的 src，返回 (是否有图, JSON字符串)。
+
+    base_url 不为空时，相对路径自动转绝对路径（urljoin）。
+    过滤掉站点 logo/UI 图标、整版报纸缩略图、广告图，只保留正文图片新闻照片。
+    """
     imgs = soup.find_all("img")
     urls = []
+    # 整版报纸版面缩略图关键词（整版页面的小图，不是新闻照片）
+    _board_thumb_kws = (
+        "board", "page_", "page-", "thumb", "small", "mini", "icon_",
+        "nav_", "nav-", "banner", "ad_", "ad-", "qrcode", "qr_", "ewm",
+        "sprite", "btn_", "arrow", "go_top", "down.", "loading",
+    )
+    # 站点公共资源目录关键词
+    _public_res_kws = (
+        "logo", "icon", "d1.gif", "d.gif", "files/", "qrapp", "slogen",
+        "/images/web/", "/webinc/", "header", "footer", "/nav/",
+    )
     for img in imgs:
-        src = img.get("src") or img.get("data-src") or img.get("data-original")
-        if src and not src.startswith("data:"):
-            urls.append(src)
+        s = img.get("src") or img.get("data-src") or img.get("data-original")
+        if not s or s.startswith("data:"):
+            continue
+        sl = s.lower()
+        # 过滤 logo/UI 图标/站点公共资源
+        if any(x in sl for x in _public_res_kws):
+            continue
+        # 过滤整版报纸版面缩略图、广告图、导航图
+        if any(x in sl for x in _board_thumb_kws):
+            continue
+        # 只保留图片扩展名
+        if not re.search(r"\.(jpg|jpeg|png|gif|webp)(\.|\?|$)", sl):
+            continue
+        # 过滤过小的缩略图（文件名含尺寸暗示，如 _s. _thumb. _100x100）
+        if re.search(r"(_s|_thumb|_\d{2,3}x\d{2,3})\.(jpg|jpeg|png|gif)", sl):
+            continue
+        if base_url:
+            s = urljoin(base_url, s)
+        # SSL 证书不匹配的域名（如 ccin.com.cn）统一 https→http，避免浏览器警告
+        s = _normalize_url(s)
+        if s not in urls:
+            urls.append(s)
     if not urls:
         return False, None
     return True, json.dumps(urls, ensure_ascii=False)
 
-def extract_article(html: str) -> ArticleContent | None:
+
+def _is_photo_news(soup, body_text: str, image_count: int,
+                   title: str = "", url: str = "") -> bool:
+    """两层判定是否为图片新闻。
+
+    第一层：确认是一条新闻（过滤广告/公告/列表页）
+      - 标题 4~50 字，不含「公告/声明/通知/广告/招聘/启事」等非新闻词
+      - 正文 > 50 字
+    第二层：确认是图片新闻（有图 + 有图注/多图/短正文）
+      - 必须有图（image_count >= 1）
+      - 满足以下任一：
+        (a) 有图注（figcaption 或 img alt/title >= 4 字）
+        (b) 图片数 >= 2（组照）
+        (c) 正文 <= 500 字（短图文）
+    """
+    body = (body_text or "").strip()
+    body_len = len(body)
+    title_clean = (title or "").strip()
+
+    # ---------- 第一层：是新闻吗？ ----------
+    # 标题长度不合理
+    if len(title_clean) < 4 or len(title_clean) > 60:
+        return False
+    # 非新闻标题关键词
+    _non_news_kws = ("公告", "声明", "通知", "广告", "招聘", "启事", "寻人", "寻物",
+                     "致歉", "更正", "鸣谢", "讣告", "婚讯", "寿辰",
+                     "本版责编", "本版编辑", "责编：", "责任编辑", "版式策划",
+                     "图片编辑", "美术编辑", "校检", "审读")
+    if any(kw in title_clean for kw in _non_news_kws):
+        return False
+    # 正文过短（不是新闻）
+    if body_len < 50:
+        return False
+
+    # ---------- 第二层：是图片新闻吗？ ----------
+    if image_count < 1:
+        return False
+    # (a) 有图注
+    has_caption = False
+    for sel in ("figcaption", "p[class*=caption]", "p[class*=pic]",
+                "div[class*=caption]", "div[class*=pic]", "span[class*=caption]"):
+        try:
+            if soup.select(sel):
+                has_caption = True
+                break
+        except Exception:
+            pass
+    if not has_caption:
+        for img in soup.find_all("img"):
+            for attr in ("alt", "title"):
+                v = (img.get(attr) or "").strip()
+                if len(v) >= 4:
+                    has_caption = True
+                    break
+            if has_caption:
+                break
+    if has_caption:
+        return True
+    # (b) 多图组照
+    if image_count >= 2:
+        return True
+    # (c) 短正文
+    if body_len <= 500:
+        return True
+    return False
+
+
+def extract_article(html: str, base_url: str = "") -> ArticleContent | None:
     """兜底：从详情页解析正文，找最长文本块容器。"""
     soup = BeautifulSoup(html, "html.parser")
-    has_image, image_urls = _extract_image_urls(soup)
+    has_image, image_urls = _extract_image_urls(soup, base_url)
     title = (soup.find("h1") or soup.find("title"))
     title = title.get_text(strip=True) if title else "(无标题)"
     candidates = soup.find_all(["div", "article", "section"])
@@ -194,11 +446,38 @@ def extract_article(html: str) -> ArticleContent | None:
     publish_date = None
     meta_author = soup.find("meta", attrs={"name": "author"})
     if meta_author:
-        author = meta_author.get("content")
+        candidate = (meta_author.get("content") or "").strip()
+        # 过滤掉不像真名的 meta author（如 ccin 的 "TOPQH" 站点 ID：全 ASCII 无中文）
+        if candidate and re.search(r"[\u4e00-\u9fa5]", candidate):
+            author = candidate
+    # author 兜底：从正文前 300 字找"记者XX/通讯员XX/作者：XX"
+    if not author:
+        m = re.search(
+            r'记者\s*([\u4e00-\u9fa5]{2,3})|通讯员\s*([\u4e00-\u9fa5]{2,3})|作者[：:]\s*([\u4e00-\u9fa5]{2,4})',
+            body[:300],
+        )
+        if m:
+            author = " ".join(g for g in m.groups() if g)
     meta_date = soup.find("meta", attrs={"name": "publishdate"}) \
         or soup.find("meta", attrs={"name": "date"})
     if meta_date:
         publish_date = meta_date.get("content")
+    # publish_date 兜底：从详情页 .date/.time/.pubtime 元素或正文 regex 提取
+    if not publish_date:
+        for cls in ("date", "time", "pubtime", "pub-date", "article-time"):
+            el = soup.find(attrs={"class": re.compile(cls, re.I)})
+            if el:
+                t = el.get_text(strip=True)
+                # 兼容 "2026-09-22" 和 "2026年09月22日"
+                m = re.search(r'(\d{4})[-年](\d{1,2})[月-](\d{1,2})', t)
+                if m:
+                    publish_date = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                    break
+    if not publish_date:
+        # 兼容 "2026-09-22" 和 "2026年09月22日"
+        m = re.search(r'(\d{4})[-年](\d{1,2})[月-](\d{1,2})', body[:200])
+        if m:
+            publish_date = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
     return ArticleContent(
         title=title, author=author, publish_date=publish_date,
         summary=body[:80].replace("\n", " ") + "…", body_text=body,
@@ -223,26 +502,35 @@ def parse_zgsyb_object(html: str) -> dict | None:
         return None
 
 
-def crawl_zgsyb(src: dict) -> dict:
-    """中国石油报：抓根入口 redirect 到当期 SPA 页，按版面 alias 过滤分发文章。"""
+def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
+    """中国石油报：抓根入口 redirect 到当期 SPA 页，按版面 alias 过滤分发文章。
+
+    target_date: 指定日期抓取（用于历史回填）；None 则抓当期最新。
+    """
     stats = {"fetched": 0, "added": 0, "skipped": 0, "blocked": 0}
     # alias -> 栏目名映射：支持一个栏目配多个 alias 候选（第03版 alias 随期变）
     alias_to_col: dict[str, str] = {}
     for c in src["columns"]:
         for a in (c.get("aliases") or [c["name"]]):
             alias_to_col[a] = c["name"]
-    home = src["home"]
 
-    if not robots_allows(home):
-        print("  [robots 禁止] 中国石油报根入口")
+    # 构造目标日期的 SPA 页 URL
+    if target_date:
+        date_path = target_date.strftime("%Y-%m/%d")
+        url = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/"
+    else:
+        url = src["home"]
+
+    if not robots_allows(url):
+        print(f"  [robots 禁止] 中国石油报 {url}")
         stats["blocked"] += 1
         return stats
 
-    # 访问根入口，follow redirect 到当期 /zgsyb/YYYY-MM/DD/
+    # 访问入口，follow redirect 到当期 /zgsyb/YYYY-MM/DD/
     try:
-        r = get_session().get(home, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
+        r = get_session().get(url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
         if r.status_code != 200:
-            print(f"  [跳过] 中国石油报 HTTP {r.status_code}")
+            print(f"  [跳过] 中国石油报 HTTP {r.status_code}（{target_date or '当期'}）")
             return stats
         # 中国石油报 SPA 页 charset=GBK，强制 gbk 解码（apparent_encoding 可能探测错导致乱码）
         spa_html = r.content.decode("gbk", errors="replace")
@@ -254,7 +542,7 @@ def crawl_zgsyb(src: dict) -> dict:
             spa_html = r.content.decode("gbk", errors="replace")
         stats["fetched"] += 1
     except requests.RequestException as e:
-        print(f"  [错误] 中国石油报根入口 -> {e}")
+        print(f"  [错误] 中国石油报 -> {e}")
         return stats
 
     # 从 final URL 提取日期路径片段：r.url 形如 .../zgsyb/2026-09/29/
@@ -267,6 +555,16 @@ def crawl_zgsyb(src: dict) -> dict:
         print("  [错误] 未能从 SPA 页提取 epaperObject，可能页面结构变了")
         return stats
     cur_date_iso = obj.get("curDate") or cur_date_iso
+
+    # 【修复日期错位】指定 target_date 时，校验服务端返回的当期日期是否一致。
+    # 不一致说明该日期休刊，服务端重定向到了最近一期，应跳过而非用错日期入库。
+    if target_date and cur_date_iso and cur_date_iso != target_date.isoformat():
+        print(f"  [跳过] 目标 {target_date} 但当期为 {cur_date_iso}，该日期休刊")
+        return stats
+    if target_date:
+        publish_date = target_date.isoformat()
+    else:
+        publish_date = cur_date_iso
 
     pages = obj.get("textAreaData", {}).get("pages", [])
     if not pages:
@@ -315,34 +613,47 @@ def crawl_zgsyb(src: dict) -> dict:
             cid = a.get("contentid")
             # 文章 URL：构造锚点定位到当期 SPA 页（正文已在 body_text 里，URL 仅供审核台点开参考）
             art_url = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/#con_{cid}"
-            # 提取图片URL
-            img_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', body_html, re.I)
-            img_urls = [u for u in img_matches if not u.startswith("data:")]
-            has_image = len(img_urls) > 0
+            # 中国石油报图片不在正文 HTML 里，而在 imageinfo[].path 字段（相对路径）。
+            # imgPrefix 通常是 "res/"，需与当期版面 URL 拼接成绝对地址。
+            img_urls: list[str] = []
+            img_prefix = obj.get("imgPrefix", "") or ""
+            base_for_img = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/"
+            for info in (a.get("imageinfo") or []):
+                p = (info.get("path") or info.get("preview") or "").strip()
+                if p:
+                    full = urljoin(base_for_img, img_prefix + p)
+                    img_urls.append(full)
+            # 兜底：正文 HTML 里的 <img> 标签
+            has_body_img, body_img_urls = _extract_image_urls(
+                BeautifulSoup(body_html, "html.parser"), art_url
+            )
+            if has_body_img and body_img_urls:
+                try:
+                    img_urls.extend(json.loads(body_img_urls))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            has_image = bool(img_urls)
             image_urls = json.dumps(img_urls, ensure_ascii=False) if img_urls else None
-            if has_image:
-                added = db.upsert_article(
-                    col_id, title=title, url=art_url, author=author,
-                    publish_date=cur_date_iso, summary=summary, body_text=body_text,
-                    content_hash=content_hash(body_text), has_image=True, image_urls=image_urls,
-                )
-            else:
-                if not config.AI_FILTER_ENABLED:
-                    rel = True
-                else:
-                    rel, _tags = ai_filter.is_relevant(title, summary, body_text=body_text)
-                if not rel:
-                    stats["skipped"] += 1
-                    print(f"  [AI 跳过] {title}")
-                    continue
-                added = db.upsert_article(
-                    col_id, title=title, url=art_url, author=author,
-                    publish_date=cur_date_iso, summary=summary, body_text=body_text,
-                    content_hash=content_hash(body_text), has_image=False, image_urls=image_urls,
-                )
+            # 【新规则1】两层判定：先确认是新闻，再确认是图片新闻
+            if not _is_photo_news(BeautifulSoup(body_html, "html.parser"), body_text,
+                                  len(img_urls), title=title, url=art_url):
+                stats["skipped_no_image"] = stats.get("skipped_no_image", 0) + 1
+                continue
+            # 【新规则2】只保留 5 类
+            cat = classify_article(src["name"], col_name, title, body_text)
+            if not cat:
+                stats["skipped_category"] = stats.get("skipped_category", 0) + 1
+                continue
+            # 【新规则3】只存图注/短说明，弃长正文
+            short_text = extract_caption_or_short(BeautifulSoup(body_html, "html.parser"), body_text)
+            added = db.upsert_article(
+                col_id, title=title, url=_normalize_url(art_url), author=author,
+                publish_date=publish_date, summary=short_text[:80], body_text=short_text,
+                content_hash=content_hash(short_text), has_image=True, image_urls=image_urls,
+            )
             if added:
                 stats["added"] += 1
-                print(f"  + {title}")
+                print(f"  + [{cat}] {title}")
             else:
                 stats["skipped"] += 1
         time.sleep(config.CRAWL_INTERVAL_SECONDS)
@@ -373,7 +684,7 @@ def parse_lnd_layout(html: str, base_url: str) -> list[ArticleLink]:
 def parse_lnd_article(html: str, url: str = "") -> ArticleContent | None:
     """辽宁日报详情页：提取标题/作者/正文。日期从 URL 提取。"""
     soup = BeautifulSoup(html, "html.parser")
-    has_image, image_urls = _extract_image_urls(soup)
+    has_image, image_urls = _extract_image_urls(soup, url)
     title = None
     # 标题选择器：辽宁日报详情页标题在 <h3>（h1/h2 为空），依次试 h1→h3→标题容器→<title>
     for finder in (
@@ -396,14 +707,17 @@ def parse_lnd_article(html: str, url: str = "") -> ArticleContent | None:
             body = txt
     if not body:
         body = soup.get_text("\n", strip=True)
-    # 作者：正文前 300 字找「记者XX报道/报/通讯员」格式
-    # 要求人名后紧跟「报道/报/通讯员」，避免把「记者采访了XX」误匹配为「采访了」
+    # 作者：搜正文开头 300 字 + 结尾 300 字（党报署名常在文末，如"本报记者 陶阳 文"）
     author = None
-    m = re.search(r'记者\s*([\u4e00-\u9fa5]{2,3})\s*(?:报道|报|通讯员)', body[:300])
+    author_haystack = body[:300] + "\n" + body[-300:]
+    m = re.search(
+        r'记者\s*([\u4e00-\u9fa5]{2,3})|通讯员\s*([\u4e00-\u9fa5]{2,3})|作者[：:]\s*([\u4e00-\u9fa5]{2,4})',
+        author_haystack,
+    )
     if m:
-        name = m.group(1)
+        name = next((g for g in m.groups() if g), None)
         if name:
-            author = "记者 " + name
+            author = name
     # 日期：从文章 URL 路径 /con/YYYYMM/DD/ 提取
     publish_date = None
     m = re.search(r'/con/(\d{6})/(\d{2})/', url)
@@ -417,20 +731,52 @@ def parse_lnd_article(html: str, url: str = "") -> ArticleContent | None:
     )
 
 
-def crawl_lnd(src: dict) -> dict:
-    """辽宁日报：按栏目 URL 模板填当期日期，抓 layout 页提 con 链接，进详情页。"""
-    stats = {"fetched": 0, "added": 0, "skipped": 0, "blocked": 0}
-    today = date.today()
-    # 试今天 + 前 2 天（凌晨跑时今天可能没出）
-    days = [today, today - timedelta(days=1), today - timedelta(days=2)]
+def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
+    """辽宁日报：按栏目 URL 模板填当期日期，抓 layout 页提 con 链接，进详情页。
+
+    target_date: 指定日期抓取；None 则回溯最近 7 天（覆盖休刊期）。
+    """
+    stats = {"fetched": 0, "added": 0, "skipped": 0, "blocked": 0,
+             "skipped_no_image": 0, "skipped_category": 0}
+    if target_date:
+        days = [target_date]
+    else:
+        # 回溯 7 天：覆盖十一/春节等党报休刊长假，凌晨跑时今天可能还没出
+        days = _lookback_days(7)
     for col in src["columns"]:
         tmpl = col["url"]
         if "{yyyymm}" not in tmpl:
             continue
+        col_name = col["name"]
         layout_url = None
         layout_html = None
+        # 辽宁日报版号随期变（各地可能在 node_04/node_07 或不存在），
+        # 先抓头版 node_01 的版面导航，按版名动态匹配真实 node 号。
         for d in days:
-            url = tmpl.format(yyyymm=d.strftime("%Y%m"), dd=d.strftime("%d"))
+            yyyymm = d.strftime("%Y%m")
+            dd = d.strftime("%d")
+            base = f"https://epaper.lnd.com.cn/lnrbepaper/pc/layout/{yyyymm}/{dd}/"
+            nav_url = base + "node_01.html"
+            if not robots_allows(nav_url):
+                stats["blocked"] += 1
+                continue
+            nav_html = fetch(nav_url)
+            stats["fetched"] += 1
+            if not nav_html:
+                time.sleep(config.CRAWL_INTERVAL_SECONDS)
+                continue
+            nav_soup = BeautifulSoup(nav_html, "html.parser")
+            actual_node = None
+            for a in nav_soup.select("a[href*=node_]"):
+                link_text = a.get_text(strip=True)
+                if col_name in link_text:
+                    actual_node = a.get("href", "")
+                    break
+            if actual_node:
+                url = urljoin(base, actual_node)
+            else:
+                # 当天无此版面，回退用配置的硬编码版号（可能 404，外层会跳过）
+                url = tmpl.format(yyyymm=yyyymm, dd=dd)
             if not robots_allows(url):
                 stats["blocked"] += 1
                 continue
@@ -442,7 +788,7 @@ def crawl_lnd(src: dict) -> dict:
                 break
             time.sleep(config.CRAWL_INTERVAL_SECONDS)
         if not layout_html:
-            print(f"  [跳过] {col['name']} 最近 3 天都抓不到 layout 页")
+            print(f"  [跳过] {col_name} 最近 3 天都抓不到 layout 页")
             continue
         col_id = db.get_column_id(src["name"], col["name"])
         if col_id is None:
@@ -462,33 +808,33 @@ def crawl_lnd(src: dict) -> dict:
             art = parse_lnd_article(detail, link.url)
             if not art or not art.title or art.title == "(无标题)":
                 continue
-            if art.has_image:
-                added = db.upsert_article(
-                    col_id, title=art.title, url=link.url, author=art.author,
-                    publish_date=art.publish_date, summary=art.summary,
-                    body_text=art.body_text, content_hash=content_hash(art.body_text),
-                    has_image=True,
-                    image_urls=art.image_urls,
-                )
-            else:
-                if not config.AI_FILTER_ENABLED:
-                    rel = True
-                else:
-                    rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
-                if not rel:
-                    stats["skipped"] += 1
-                    print(f"  [AI 跳过] {art.title}")
-                    continue
-                added = db.upsert_article(
-                    col_id, title=art.title, url=link.url, author=art.author,
-                    publish_date=art.publish_date, summary=art.summary,
-                    body_text=art.body_text, content_hash=content_hash(art.body_text),
-                    has_image=False,
-                    image_urls=art.image_urls,
-                )
+            # 日期校验：指定 target_date 时，文章日期必须匹配（防重定向到其他期）
+            if target_date and art.publish_date and art.publish_date != target_date.isoformat():
+                stats["skipped"] += 1
+                continue
+            # 【新规则1】严格图片新闻判定：≥1 张图 且(有图注 OR 正文 ≤500 字)
+            _lnd_soup = BeautifulSoup(detail, "html.parser")
+            _lnd_img_count = len(json.loads(art.image_urls)) if art.image_urls else 0
+            if not _is_photo_news(_lnd_soup, art.body_text, _lnd_img_count,
+                                  title=art.title, url=link.url):
+                stats["skipped_no_image"] = stats.get("skipped_no_image", 0) + 1
+                continue
+            # 【新规则2】只保留 5 类
+            cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            if not cat:
+                stats["skipped_category"] = stats.get("skipped_category", 0) + 1
+                continue
+            # 【新规则3】只存图注/短说明，弃长正文
+            short_text = extract_caption_or_short(_lnd_soup, art.body_text)
+            added = db.upsert_article(
+                col_id, title=art.title, url=_normalize_url(link.url), author=art.author,
+                publish_date=art.publish_date, summary=short_text[:80],
+                body_text=short_text, content_hash=content_hash(short_text),
+                has_image=True, image_urls=art.image_urls,
+            )
             if added:
                 stats["added"] += 1
-                print(f"  + {art.title}")
+                print(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
     return stats
@@ -496,9 +842,13 @@ def crawl_lnd(src: dict) -> dict:
 
 # ---------------- 兜底（未来新加媒体） ----------------
 
-def crawl_generic(src: dict) -> dict:
-    """兜底：固定栏目 URL + 启发式解析（旧逻辑）。跳过含 {yyyymm} 模板的栏目。"""
-    stats = {"fetched": 0, "added": 0, "skipped": 0, "blocked": 0}
+def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dict:
+    """兜底：固定栏目 URL + 启发式解析（旧逻辑）。跳过含 {yyyymm} 模板的栏目。
+
+    date_range: (start, end) 日期范围过滤，仅入库 publish_date 在此范围内的文章。
+    """
+    stats = {"fetched": 0, "added": 0, "skipped": 0, "blocked": 0,
+             "skipped_no_image": 0, "skipped_category": 0}
     for col in src["columns"]:
         url = col.get("url", "")
         if not url or "{" in url:
@@ -526,48 +876,247 @@ def crawl_generic(src: dict) -> dict:
             detail = fetch(link.url)
             if not detail:
                 continue
-            art = extract_article(detail)
+            art = extract_article(detail, link.url)
             if not art:
                 continue
-            if art.has_image:
-                added = db.upsert_article(
-                    col_id, title=art.title, url=link.url, author=art.author,
-                    publish_date=art.publish_date, summary=art.summary,
-                    body_text=art.body_text, content_hash=content_hash(art.body_text),
-                    has_image=True,
-                    image_urls=art.image_urls,
-                )
-            else:
-                if not config.AI_FILTER_ENABLED:
-                    rel = True
-                else:
-                    rel, _tags = ai_filter.is_relevant(art.title, art.summary, body_text=art.body_text)
-                if not rel:
-                    stats["skipped"] += 1
-                    print(f"  [AI 跳过] {art.title}")
-                    continue
-                added = db.upsert_article(
-                    col_id, title=art.title, url=link.url, author=art.author,
-                    publish_date=art.publish_date, summary=art.summary,
-                    body_text=art.body_text, content_hash=content_hash(art.body_text),
-                    has_image=False,
-                    image_urls=art.image_urls,
-                )
+            # 二次校验：排除分类页（标题含"首页"或 URL 不像文章）
+            if "首页" in art.title or "/detail/" not in link.url:
+                stats["skipped"] += 1
+                continue
+            # 日期范围过滤（新闻站用）
+            if date_range and art.publish_date:
+                try:
+                    ad = date.fromisoformat(art.publish_date)
+                    if not (date_range[0] <= ad <= date_range[1]):
+                        stats["skipped"] += 1
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            # 【新规则1】严格图片新闻判定
+            _gen_soup = BeautifulSoup(detail, "html.parser")
+            _gen_img_count = len(json.loads(art.image_urls)) if art.image_urls else 0
+            if not _is_photo_news(_gen_soup, art.body_text, _gen_img_count,
+                                  title=art.title, url=link.url):
+                stats["skipped_no_image"] += 1
+                continue
+            # 【新规则2】只保留 5 类
+            cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            if not cat:
+                stats["skipped_category"] += 1
+                continue
+            # 【新规则3】只存图注/短说明，弃长正文
+            short_text = extract_caption_or_short(_gen_soup, art.body_text)
+            added = db.upsert_article(
+                col_id, title=art.title, url=_normalize_url(link.url), author=art.author,
+                publish_date=art.publish_date, summary=short_text[:80],
+                body_text=short_text, content_hash=content_hash(short_text),
+                has_image=True, image_urls=art.image_urls,
+            )
             if added:
                 stats["added"] += 1
-                print(f"  + {art.title}")
+                print(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
     return stats
 
 
+# ---------------- 人民日报（layout + content，类辽宁日报结构） ----------------
+
+def parse_rmrb_layout(html: str, base_url: str) -> list[ArticleLink]:
+    """人民日报版面列表页：提取 content_XXX.html 文章链接。"""
+    soup = BeautifulSoup(html, "html.parser")
+    links: list[ArticleLink] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href = urljoin(base_url, a["href"])
+        if "/content/" in href and re.search(r"content_\d+\.html", href):
+            if href in seen:
+                continue
+            seen.add(href)
+            title = a.get_text(strip=True)
+            if title and len(title) >= 4:
+                links.append(ArticleLink(title=title, url=href))
+    return links
+
+
+def parse_rmrb_article(html: str, url: str = "") -> ArticleContent | None:
+    """人民日报详情页：提取标题/作者/正文/图片。日期从 URL 提取。"""
+    soup = BeautifulSoup(html, "html.parser")
+    has_image, image_urls = _extract_image_urls(soup, url)
+    # 标题：h1 → h2 → .article-title → title
+    title = None
+    for finder in (
+        lambda: soup.find("h1"),
+        lambda: soup.find("h2"),
+        lambda: soup.find("div", class_=re.compile(r"article.?title|^title$", re.I)),
+    ):
+        t = finder()
+        if t and t.get_text(strip=True):
+            title = t.get_text(strip=True)
+            break
+    if not title:
+        t = soup.find("title")
+        title = t.get_text(strip=True) if t else None
+    # 正文：取最长 div 文本块
+    body = ""
+    for div in soup.find_all("div"):
+        txt = div.get_text("\n", strip=True)
+        if len(txt) > len(body):
+            body = txt
+    if not body:
+        body = soup.get_text("\n", strip=True)
+    # 作者：搜正文开头 300 字 + 结尾 300 字（党报署名常在文末，如"本报记者 陶阳 文"）
+    author = None
+    author_haystack = body[:300] + "\n" + body[-300:]
+    m = re.search(
+        r'记者\s*([\u4e00-\u9fa5]{2,3})|通讯员\s*([\u4e00-\u9fa5]{2,3})|作者[：:]\s*([\u4e00-\u9fa5]{2,4})',
+        author_haystack,
+    )
+    if m:
+        name = next((g for g in m.groups() if g), None)
+        if name:
+            author = name
+    # 日期：从 URL /content/YYYYMM/DD/ 提取
+    publish_date = None
+    m = re.search(r'/content/(\d{6})/(\d{2})/', url)
+    if m:
+        ym, dd = m.group(1), m.group(2)
+        publish_date = f"{ym[:4]}-{ym[4:6]}-{dd}"
+    return ArticleContent(
+        title=title or "(无标题)", author=author, publish_date=publish_date,
+        summary=body[:80].replace("\n", " "), body_text=body,
+        has_image=has_image, image_urls=image_urls,
+    )
+
+
+def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
+    """人民日报：按栏目 URL 模板填当期日期，抓 layout 页提 content 链接，进详情页。
+
+    target_date: 指定日期抓取；None 则回溯最近 7 天。
+    """
+    stats = {"fetched": 0, "added": 0, "skipped": 0, "blocked": 0,
+             "skipped_no_image": 0, "skipped_category": 0}
+    if target_date:
+        days = [target_date]
+    else:
+        # 回溯 7 天：覆盖十一/春节等党报休刊长假
+        days = _lookback_days(7)
+    for col in src["columns"]:
+        tmpl = col["url"]
+        if "{yyyymm}" not in tmpl:
+            continue
+        col_name = col["name"]
+        layout_url = None
+        layout_html = None
+        # 人民日报版号随期变，先抓头版 node_01 的版面导航，按版名动态匹配真实 node 号。
+        for d in days:
+            yyyymm = d.strftime("%Y%m")
+            dd = d.strftime("%d")
+            base = f"http://paper.people.com.cn/rmrb/pc/layout/{yyyymm}/{dd}/"
+            nav_url = base + "node_01.html"
+            if not robots_allows(nav_url):
+                stats["blocked"] += 1
+                continue
+            nav_html = fetch(nav_url)
+            stats["fetched"] += 1
+            if not nav_html:
+                time.sleep(config.CRAWL_INTERVAL_SECONDS)
+                continue
+            nav_soup = BeautifulSoup(nav_html, "html.parser")
+            actual_node = None
+            for a in nav_soup.select("a[href*=node_]"):
+                link_text = a.get_text(strip=True)
+                if col_name in link_text:
+                    actual_node = a.get("href", "")
+                    break
+            if actual_node:
+                url = urljoin(base, actual_node)
+            else:
+                # 当天无此版面，回退用配置的硬编码版号（可能 404，外层会跳过）
+                url = tmpl.format(yyyymm=yyyymm, dd=dd)
+            if not robots_allows(url):
+                stats["blocked"] += 1
+                continue
+            html = fetch(url)
+            stats["fetched"] += 1
+            if html:
+                layout_url = url
+                layout_html = html
+                break
+            time.sleep(config.CRAWL_INTERVAL_SECONDS)
+        if not layout_html:
+            print(f"  [跳过] {col_name} 最近 3 天都抓不到 layout 页")
+            continue
+        col_id = db.get_column_id(src["name"], col["name"])
+        if col_id is None:
+            print(f"  [跳过] 未找到栏目 {src['name']}/{col['name']}")
+            continue
+        links = parse_rmrb_layout(layout_html, layout_url)[:config.CRAWL_MAX_PER_COLUMN]
+        print(f"  [{col['name']}] 发现 {len(links)} 个文章链接")
+        for link in links:
+            time.sleep(config.CRAWL_INTERVAL_SECONDS)
+            if not robots_allows(link.url):
+                stats["blocked"] += 1
+                continue
+            detail = fetch(link.url)
+            stats["fetched"] += 1
+            if not detail:
+                continue
+            art = parse_rmrb_article(detail, link.url)
+            if not art or not art.title or art.title == "(无标题)":
+                continue
+            # 日期校验：指定 target_date 时，文章日期必须匹配（防重定向到其他期）
+            if target_date and art.publish_date and art.publish_date != target_date.isoformat():
+                stats["skipped"] += 1
+                continue
+            # 【新规则1】严格图片新闻判定：≥1 张图 且(有图注 OR 正文 ≤500 字)
+            _rmrb_soup = BeautifulSoup(detail, "html.parser")
+            _rmrb_img_count = len(json.loads(art.image_urls)) if art.image_urls else 0
+            if not _is_photo_news(_rmrb_soup, art.body_text, _rmrb_img_count,
+                                  title=art.title, url=link.url):
+                stats["skipped_no_image"] += 1
+                continue
+            # 【新规则2】只保留 5 类
+            cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            if not cat:
+                stats["skipped_category"] += 1
+                continue
+            # 【新规则3】只存图注/短说明
+            short_text = extract_caption_or_short(_rmrb_soup, art.body_text)
+            added = db.upsert_article(
+                col_id, title=art.title, url=_normalize_url(link.url), author=art.author,
+                publish_date=art.publish_date, summary=short_text[:80],
+                body_text=short_text, content_hash=content_hash(short_text),
+                has_image=True, image_urls=art.image_urls,
+            )
+            if added:
+                stats["added"] += 1
+                print(f"  + [{cat}] {art.title}")
+            else:
+                stats["skipped"] += 1
+    return stats
+
+
+# ---------------- 中国化工报（中化新网新闻列表，走 generic 解析） ----------------
+
+def crawl_ccin(src: dict, date_range: tuple[date, date] | None = None) -> dict:
+    """中国化工报（中化新网）：新闻列表页 + 详情页，应用图片新闻+5类过滤。
+
+    复用 crawl_generic 的解析逻辑，但因为 ccin.com.cn 是新闻站（非数字报），
+    文章 URL 形如 /detail/{id}/news，直接走 extract_links + extract_article。
+
+    date_range: (start, end) 日期范围过滤（新闻站无日期 URL，靠文章发布日期过滤）。
+    """
+    return crawl_generic(src, date_range=date_range)
+
+
 # ---------------- 主流程 ----------------
 
-def crawl_all() -> dict:
+def crawl_all(target_date: date | None = None) -> dict:
     """遍历 config.MEDIA_SOURCES，按 source_name 分派解析器。返回统计。
 
-    每个媒体源独立 try-except：单个源出错（页面结构变化、网络故障等）
-    不影响其他源继续爬取，错误收集到 stats["errors"]。
+    target_date: 指定日期抓取（数字报用）；None 则抓当期最新。
+    每个媒体源独立 try-except：单个源出错不影响其他源。
     """
     stats = {"sources": 0, "fetched": 0, "added": 0, "skipped": 0, "blocked": 0, "errors": []}
     for src in config.MEDIA_SOURCES:
@@ -576,18 +1125,80 @@ def crawl_all() -> dict:
         print(f"\n===== {name} =====")
         try:
             if name == "中国石油报":
-                s = crawl_zgsyb(src)
+                s = crawl_zgsyb(src, target_date=target_date)
             elif name == "辽宁日报":
-                s = crawl_lnd(src)
+                s = crawl_lnd(src, target_date=target_date)
+            elif name == "人民日报":
+                s = crawl_rmrb(src, target_date=target_date)
+            elif name == "中国化工报":
+                s = crawl_ccin(src)
             else:
                 s = crawl_generic(src)
-            for k in ("fetched", "added", "skipped", "blocked"):
-                stats[k] += s.get(k, 0)
+            for k in ("fetched", "added", "skipped", "blocked",
+                       "skipped_no_image", "skipped_category"):
+                stats[k] = stats.get(k, 0) + s.get(k, 0)
         except Exception as e:
             err_msg = f"{name}: {type(e).__name__}: {e}"
             print(f"[crawl_all] 媒体源出错，跳过：{err_msg}")
             stats["errors"].append(err_msg)
     return stats
+
+
+def crawl_date_range(start_date: str | date, end_date: str | date) -> dict:
+    """按日期范围爬取所有媒体源的图片新闻（用于历史回填）。
+
+    start_date / end_date: "YYYY-MM-DD" 字符串或 date 对象。
+    - 中国石油报/辽宁日报/人民日报：逐日按指定日期的数字报 URL 抓取
+    - 中国化工报：抓新闻列表，按文章发布日期过滤到范围内
+
+    用法：crawler.crawl_date_range("2026-09-20", "2026-10-03")
+    """
+    if isinstance(start_date, str):
+        start_date = date.fromisoformat(start_date)
+    if isinstance(end_date, str):
+        end_date = date.fromisoformat(end_date)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    total = {"sources": 0, "fetched": 0, "added": 0, "skipped": 0, "blocked": 0,
+             "skipped_no_image": 0, "skipped_category": 0, "errors": []}
+    total_days = (end_date - start_date).days + 1
+    print(f"\n{'='*60}")
+    print(f"日期范围爬取：{start_date} ~ {end_date}（共 {total_days} 天）")
+    print(f"{'='*60}")
+
+    # 数字报：逐日抓取
+    cur = start_date
+    while cur <= end_date:
+        print(f"\n>>> 日期 {cur.isoformat()} <<<")
+        day_stats = crawl_all(target_date=cur)
+        for k in ("fetched", "added", "skipped", "blocked",
+                   "skipped_no_image", "skipped_category"):
+            total[k] += day_stats.get(k, 0)
+        total["errors"].extend(day_stats.get("errors", []))
+        cur += timedelta(days=1)
+        time.sleep(2)  # 日期间隔，避免请求过于密集
+
+    # 中国化工报：新闻站无日期 URL，抓列表后按日期范围过滤
+    print(f"\n>>> 中国化工报（按日期范围 {start_date}~{end_date} 过滤）<<<")
+    for src in config.MEDIA_SOURCES:
+        if src["name"] == "中国化工报":
+            s = crawl_ccin(src, date_range=(start_date, end_date))
+            for k in ("fetched", "added", "skipped", "blocked",
+                       "skipped_no_image", "skipped_category"):
+                total[k] += s.get(k, 0)
+            total["errors"].extend(s.get("errors", []))
+            break
+
+    print(f"\n{'='*60}")
+    print(f"日期范围爬取完成：{start_date} ~ {end_date}")
+    print(f"  新增 {total['added']} 条，跳过 {total['skipped']} 条，"
+          f"无图过滤 {total.get('skipped_no_image', 0)} 条，"
+          f"分类过滤 {total.get('skipped_category', 0)} 条")
+    if total["errors"]:
+        print(f"  错误 {len(total['errors'])} 条")
+    print(f"{'='*60}")
+    return total
 
 
 # ---------------- 演示种子（无网络也能看 UI） ----------------
@@ -663,7 +1274,10 @@ def main():
     print("开始爬取…")
     stats = crawl_all()
     print(f"\n完成：媒体源 {stats['sources']}，抓取 {stats['fetched']}，"
-          f"新增 {stats['added']}，跳过(已存在) {stats['skipped']}，robots拦截 {stats['blocked']}")
+          f"新增 {stats['added']}，跳过(已存在) {stats['skipped']}，"
+          f"无图跳过 {stats.get('skipped_no_image', 0)}，"
+          f"非5类跳过 {stats.get('skipped_category', 0)}，"
+          f"robots拦截 {stats['blocked']}")
 
 
 if __name__ == "__main__":

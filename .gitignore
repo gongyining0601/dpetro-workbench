@@ -1,55 +1,40 @@
-# ============ Secrets & env (NEVER commit) ============
+# 环境变量（含密钥，绝不能提交）
 .env
-.env.local
-.env.*.local
+.env.*
 
-# ============ Python venv ============
+# 虚拟环境
 .venv/
 venv/
 env/
-ENV/
 
-# ============ Python bytecode ============
+# Python 缓存
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+*.egg-info/
+.pytest_cache/
 
-# ============ Backups ============
-*.bak
-*.backup
-*.old
-*.orig
+# 本地数据与日志（云端不需要，且含用户内容）
+data/
+logs/
+*.log
 
-# ============ IDE ============
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# ============ Streamlit runtime ============
+# Streamlit 运行时
 .streamlit/secrets.toml
 
-# ============ OS ============
+# 系统文件
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ============ Logs ============
-*.log
-logs/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# ============ Temp ============
-*.tmp
-*.temp
-_tmp/
+# 备份文件
+*.bak
 
-# ============ Legacy local data (moved to Supabase) ============
-data/
-
-# ============ Local test & cleanup scripts ============
-test_security.py
-cleanup_bad_articles.py
-full_test.py
+# �����ļ�
+*.bak

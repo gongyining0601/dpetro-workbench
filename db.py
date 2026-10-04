@@ -1,4 +1,4 @@
-﻿"""PostgreSQL 建表 + 数据访问层（DAO）。
+"""PostgreSQL 建表 + 数据访问层（DAO）。
 
 2026-09-29 改造（方案 A 上云版）：
 - 从 SQLite 迁到 Supabase PostgreSQL（数据持久化到云端，多端访问）
@@ -7,6 +7,8 @@
 - INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING（PG 风格）
 - AUTOINCREMENT → BIGSERIAL（PG 自增）
 - 行对象用 RealDictCursor（行为兼容旧 sqlite3.Row 的 dict-like 访问）
+
+2026-10-03 新增：app_setting 表（key-value），用于存储访问密码哈希等应用级配置。
 
 所有 SQL 都用参数化绑定，杜绝注入；时间一律存 ISO 字符串。
 """
@@ -78,11 +80,11 @@ CREATE INDEX IF NOT EXISTS idx_article_crawled ON article(crawled_at);
 CREATE TABLE IF NOT EXISTS review_record (
     id          BIGSERIAL PRIMARY KEY,
     article_id  BIGINT NOT NULL,
-    decision    TEXT NOT NULL,   -- 相关 / 无关 / 借鉴
+    decision    TEXT NOT NULL,   -- 保存 / 删除
     note        TEXT,
     reviewed_at TEXT NOT NULL,
     UNIQUE(article_id),          -- 每篇只保留最新一次审核结论
-    FOREIGN KEY (article_id) REFERENCES article(id)
+    FOREIGN KEY (article_id) REFERENCES article(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS routine_calendar (
@@ -128,6 +130,14 @@ CREATE TABLE IF NOT EXISTS article_embedding (
     FOREIGN KEY (article_id) REFERENCES article(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_article_embedding ON article_embedding(article_id);
+
+-- 应用级配置（key-value）：目前用于存储访问密码哈希
+-- 单条记录保证"唯一性"（只有一个 access_password）
+CREATE TABLE IF NOT EXISTS app_setting (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -277,7 +287,8 @@ def fetch_unreviewed(limit: int = 50):
         cur = conn_cursor(c)
         cur.execute(
             "SELECT a.id, a.title, a.url, a.author, a.publish_date, a.summary, "
-            "LEFT(a.body_text, 500) AS body_text, a.crawled_at, c.name AS column_name, s.name AS source_name "
+            "LEFT(a.body_text, 500) AS body_text, a.crawled_at, a.has_image, a.image_urls, "
+            "c.name AS column_name, s.name AS source_name "
             "FROM article a "
             "LEFT JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
@@ -312,35 +323,63 @@ def fetch_reviewed(limit: int = 100):
             "JOIN review_record r ON r.article_id = a.id "
             "LEFT JOIN media_column c ON c.id = a.column_id "
             "LEFT JOIN media_source s ON s.id = c.source_id "
+            "WHERE r.decision='保存' "
             "ORDER BY r.reviewed_at DESC LIMIT %s", (limit,)
         )
         return cur.fetchall()
 
 
 def set_review(article_id: int, decision: str, note: str = "") -> None:
-    """标记审核结论。三种 decision（相关/借鉴/无关）均写入 review_record，便于事后复盘。
+    """审核决策二元化：保存 / 删除。
 
-    无关稿件：保留 article 行（不删，可追溯），仅从向量索引删除避免污染对标库。
+    保存：写入 review_record(decision='保存')，article 行保留，进入语义索引供选题对标。
+    删除：硬删 article 行（CASCADE 自动删 review_record + article_embedding），不可恢复。
     「今日审核」用 LEFT JOIN review_record WHERE r.id IS NULL 找未审核，
-    软删后 article 有 review_record，自动从待审列表消失。
+    保存/删除后 article 不再无 review_record，自动从待审列表消失。
     """
     with get_conn() as c:
         cur = conn_cursor(c)
-        # 任何 decision 都写入 review_record（UNIQUE article_id 保证一篇一记录）
-        cur.execute(
-            "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
-            "VALUES (%s,%s,%s,%s) "
-            "ON CONFLICT (article_id) DO UPDATE SET "
-            "decision=EXCLUDED.decision, note=EXCLUDED.note, "
-            "reviewed_at=EXCLUDED.reviewed_at",
-            (article_id, decision, note, now_iso()),
-        )
-        # 无关稿件从向量索引删除（避免污染对标库），但保留 article 行可追溯
-        if decision == "无关":
+        if decision == "保存":
             cur.execute(
-                "DELETE FROM article_embedding WHERE article_id=%s",
-                (article_id,),
+                "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
+                "VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (article_id) DO UPDATE SET "
+                "decision=EXCLUDED.decision, note=EXCLUDED.note, "
+                "reviewed_at=EXCLUDED.reviewed_at",
+                (article_id, decision, note, now_iso()),
             )
+        elif decision == "删除":
+            # 硬删 article；review_record + article_embedding 由外键 CASCADE 自动清理
+            cur.execute("DELETE FROM article WHERE id=%s", (article_id,))
+
+
+def set_review_batch(article_ids: list[int], decision: str, note: str = "") -> int:
+    """批量审核：一次 SQL 处理多条，避免单条往返。
+
+    保存：UNNEST 构造 VALUES 多行 + ON CONFLICT DO UPDATE
+    删除：DELETE WHERE id = ANY(...)，外键 CASCADE 自动清 review_record + embedding
+    返回影响行数。空列表直接返回 0。
+    """
+    if not article_ids:
+        return 0
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        if decision == "保存":
+            # UNNEST 把数组展开成多行，一次 INSERT ... ON CONFLICT 完成
+            cur.execute(
+                "INSERT INTO review_record(article_id, decision, note, reviewed_at) "
+                "SELECT id, %s, %s, %s FROM UNNEST(%s::bigint[]) AS t(id) "
+                "ON CONFLICT (article_id) DO UPDATE SET "
+                "decision=EXCLUDED.decision, note=EXCLUDED.note, "
+                "reviewed_at=EXCLUDED.reviewed_at",
+                (decision, note, now_iso(), list(article_ids)),
+            )
+        elif decision == "删除":
+            cur.execute(
+                "DELETE FROM article WHERE id = ANY(%s::bigint[])",
+                (list(article_ids),),
+            )
+        return cur.rowcount
 
 
 # ---------- DAO: column / source ----------
@@ -383,8 +422,7 @@ def stats_overview():
             "(SELECT COUNT(*) FROM article a "
             " LEFT JOIN review_record r ON r.article_id = a.id "
             " WHERE r.id IS NULL) AS unreviewed, "
-            "(SELECT COUNT(*) FROM review_record WHERE decision='相关') AS relevant, "
-            "(SELECT COUNT(*) FROM review_record WHERE decision='借鉴') AS borrow, "
+            "(SELECT COUNT(*) FROM review_record WHERE decision='保存') AS saved, "
             "(SELECT COUNT(*) FROM submission) AS submissions, "
             "(SELECT COUNT(*) FROM submission WHERE result='录用') AS published"
         )
@@ -392,11 +430,33 @@ def stats_overview():
     return {
         "总稿件": row["total_articles"],
         "待审": row["unreviewed"],
-        "相关": row["relevant"],
-        "借鉴": row["borrow"],
+        "保存": row["saved"],
         "投稿次数": row["submissions"],
         "录用次数": row["published"],
     }
+
+
+# ---------- DAO: app_setting (key-value) ----------
+
+def get_setting(key: str) -> str | None:
+    """读取应用配置值；不存在返回 None。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute("SELECT value FROM app_setting WHERE key=%s", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    """写入应用配置（UPSERT）。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "INSERT INTO app_setting(key, value, updated_at) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at",
+            (key, value, now_iso()),
+        )
 
 
 if __name__ == "__main__":
@@ -434,4 +494,31 @@ def cleanup_old_unreviewed(days: int = 90) -> int:
             deleted += 1
     if deleted:
         config.logger.info(f"清理 {deleted} 条超过 {days} 天的未审核稿件")
+    return deleted
+
+
+def cleanup_non_photo_news() -> int:
+    """一次性清理历史"非严格图片新闻"或元数据错误的稿件。
+
+    删除条件（OR）：
+    - has_image = FALSE（旧规则遗漏的纯文字稿，保险再清一次）
+    - body_text 长度 > 300 字（说明是长正文被错存，新规则只存 ≤200 字图注）
+    - author 不含中文字符（如 ccin 的 "TOPQH" 站点 ID 误识为作者）
+    - publish_date 为空（旧爬虫未提取到日期的稿件）
+
+    删除后跑 `python crawler.py` 重爬会用新 Fix 4 逻辑拿到正确 author/date。
+    返回删除条数。article_embedding + review_record 由外键 CASCADE 自动清。
+    """
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "DELETE FROM article "
+            "WHERE has_image = FALSE "
+            "OR (body_text IS NOT NULL AND LENGTH(body_text) > 300) "
+            "OR (author IS NOT NULL AND author !~ '[\\u4e00-\\u9fa5]') "
+            "OR (publish_date IS NULL OR publish_date = '')"
+        )
+        deleted = cur.rowcount
+    if deleted:
+        config.logger.info(f"清理 {deleted} 条历史问题稿件（非图片新闻/坏元数据）")
     return deleted
