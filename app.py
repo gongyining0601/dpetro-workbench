@@ -55,14 +55,14 @@ def _normalize_display_url(url: str) -> str:
 def _safe_anchor(label: str, url: str) -> str:
     """生成安全的 markdown 链接文本，仅允许 http/https 协议。
 
-    中国石油报是 SPA 数字报，单篇无独立 URL，链接指向当期整版+锚点，
-    故将链接文案统一改为「查看当期版面」，避免误导为单篇原文。
+    中国石油报是 SPA 数字报，单篇无独立 URL，锚点定位不生效，
+    正文已在库中，故直接返回提示文本，不展示无效链接。
     """
     safe_url = _normalize_display_url((url or "").strip())
     if not safe_url.startswith(("http://", "https://")):
         return f"{_md_escape(label)}：{_md_escape(safe_url)}"
     if "epaper.cnpc.com.cn" in safe_url:
-        label = "查看当期版面"
+        return "中国石油报数字报（无单篇链接，正文见下方）"
     return f"[{_md_escape(label)}]({safe_url})"
 
 
