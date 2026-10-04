@@ -207,7 +207,7 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
         return (relevant, angles)
 
     # 1) 主力：智谱 GLM（免费）
-    zp_key = os.getenv("ZHIPU_API_KEY", "")
+    zp_key = config.ZHIPU_API_KEY
     if zp_key:
         data = _call(config.ZHIPU_CHAT_URL, zp_key, config.ZHIPU_CHAT_MODEL)
         if data:
@@ -217,7 +217,7 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
 
     # 2) 后备：硅基流动 Qwen（原方案）
     config.logger.info("ai_filter: 智谱调用失败或未配 Key，回退到硅基流动 Qwen")
-    sf_key = os.getenv("SILICONFLOW_API_KEY", "")
+    sf_key = config.SF_API_KEY
     if not sf_key:
         return _decide_on_failure()
     data = _call(config.SF_CHAT_URL, sf_key, config.SF_CHAT_MODEL)
