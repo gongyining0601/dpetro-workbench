@@ -25,6 +25,9 @@ logs/
 # 图片磁盘缓存（本地下载的 base64 图片，避免提交）
 .img_cache/
 
+# 一次性部署脚本（不再跟踪，避免源码重复）
+deploy_cloud.ps1
+
 # 系统文件
 .DS_Store
 Thumbs.db

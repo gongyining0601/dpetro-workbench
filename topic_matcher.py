@@ -1,4 +1,4 @@
-"""选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
+﻿"""选题对标器：输入素材关键词，返回相似已发稿 + 角度建议 + 避坑提示。
 
 2026-09-29 改造（方案 A 上云版）：
 - 嵌入从本地 bge（sentence-transformers + torch）改为云端 API
@@ -45,7 +45,7 @@ def _init():
         _STORE = NumpyVectorStore(_INDEX_PATH)
         return _STORE
     except Exception as e:
-        print(f"[topic_matcher] 向量库初始化失败，回退关键词检索：{e}")
+        config.logger.warning(f"[topic_matcher] 向量库初始化失败，回退关键词检索：{e}")
         _STORE = None
         return None
 
@@ -140,7 +140,7 @@ def ensure_index_synced() -> dict:
                 store.upsert([str(r["id"]) for r in to_add], np.array(embs, dtype="float32"))
                 stats["added"] = len(to_add)
             except Exception as e:
-                print(f"[topic_matcher] 新增嵌入失败：{e}")
+                config.logger.warning(f"[topic_matcher] 新增嵌入失败：{e}")
                 stats["error"] = str(e)
 
         # 更新：两边都有的，正文可能被改过——本项目正文爬后不变，这里不重算，
@@ -155,7 +155,7 @@ def ensure_index_synced() -> dict:
         stats["in_index"] = store.count()
     except Exception as e:
         stats["error"] = str(e)
-        print(f"[topic_matcher] 同步失败：{e}")
+        config.logger.warning(f"[topic_matcher] 同步失败：{e}")
 
     return stats
 
@@ -255,7 +255,7 @@ def _match_vector(keywords: list[str], top_k: int, store: NumpyVectorStore) -> l
         # 多取候选便于重排
         hits = store.query(emb, top_k=max(top_k * 3, top_k))
     except Exception as e:
-        print(f"[topic_matcher] 向量查询失败，回退关键词：{e}")
+        config.logger.warning(f"[topic_matcher] 向量查询失败，回退关键词：{e}")
         return _match_keywords(keywords, top_k)
 
     metas = _fetch_meta_by_ids([aid for aid, _ in hits])
@@ -440,7 +440,7 @@ def angle_advice(keywords: list[str], matched: list[dict] | None = None) -> list
         if llm:
             return llm
     except Exception as e:
-        print(f"[topic_matcher] LLM 角度建议失败，回退启发式：{e}")
+        config.logger.warning(f"[topic_matcher] LLM 角度建议失败，回退启发式：{e}")
     return _angle_advice_heuristic(keywords)
 
 
@@ -452,13 +452,13 @@ if __name__ == "__main__":
     本地也可手动跑：python -B topic_matcher.py
     """
     stats = ensure_index_synced()
-    print(f"[topic_matcher] 同步完成："
+    config.logger.warning(f"[topic_matcher] 同步完成："
           f"in_db={stats.get('in_db', 0)}, "
           f"in_index={stats.get('in_index', 0)}, "
           f"added={stats.get('added', 0)}, "
           f"removed={stats.get('removed', 0)}, "
           f"fallback={stats.get('fallback', False)}")
     if stats.get("error"):
-        print(f"[topic_matcher] 同步警告：{stats['error']}")
+        config.logger.warning(f"[topic_matcher] 同步警告：{stats['error']}")
     elif stats.get("fallback"):
-        print("[topic_matcher] 已回退关键词检索（Silicon Flow API 或向量库初始化失败）")
+        config.logger.warning("[topic_matcher] 已回退关键词检索（Silicon Flow API 或向量库初始化失败）")

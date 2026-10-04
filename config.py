@@ -135,11 +135,11 @@ CRAWL_INTERVAL_SECONDS = 5  # 同一站点内两次请求之间的最小间隔
 CRAWL_MAX_PER_COLUMN = 20  # 每个栏目最多抓多少条新稿（一次运行）
 REQUEST_TIMEOUT = 15  # 请求超时（秒）
 
-# UA：自报家门，便于媒体侧联系；请按实际情况改成你的姓名/邮箱
-# 本地 .env 没设就用默认值
+# UA：自报家门，便于媒体侧联系；请在 .env 中配置真实联系邮箱
+# 本地 .env 没设就用默认值（包含项目名+联系邮箱占位）
 USER_AGENT = os.environ.get(
     "USER_AGENT",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "DPetroWorkbench/1.0 (石油图片新闻对标学习工具; +https://github.com/gongyining0601/dpetro-workbench)",
 )
 
 # 是否在数据库为空时自动灌入演示数据（便于先看到 UI）

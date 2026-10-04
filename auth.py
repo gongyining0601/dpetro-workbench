@@ -1,4 +1,4 @@
-﻿"""访问密码认证模块。
+"""访问密码认证模块。
 
 设计要点：
 - 单密码（唯一性）：整个应用只有一个访问密码，存储在 app_setting 表的
@@ -77,8 +77,8 @@ def set_access_password(password: str) -> None:
     """设置（或覆盖）访问密码。密码会被哈希后存储，不存明文。"""
     if not password or not isinstance(password, str):
         raise ValueError("密码不能为空")
-    if len(password) < 4:
-        raise ValueError("密码至少 4 位")
+    if len(password) < 8:
+        raise ValueError("密码至少 8 位")
     hashed = _hash_password(password)
     db.set_setting(_ACCESS_PASSWORD_KEY, hashed)
 

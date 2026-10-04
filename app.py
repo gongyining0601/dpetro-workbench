@@ -4,7 +4,7 @@
     streamlit run app.py
 
 6 个 Tab：
-1. 今日审核   —— 5 分钟审核新稿（相关 / 无关 / 借鉴）
+1. 今日审核   —— 5 分钟审核新稿（保存 / 删除）
 2. 历史已审   —— 看过去审核结果，复盘
 3. 常规日历   —— 未来两周常规选题预警 + 命中率
 4. 素材对标   —— 选题对标（语义检索）+ 图文素材库
@@ -415,7 +415,7 @@ if config.AUTH_ENABLED:
             # 首次使用：设置访问密码
             st.info("🔐 首次使用，请设置访问密码（整个应用只有一个密码，务必牢记）。")
             with st.form("set_password_form", clear_on_submit=True):
-                _pw1 = st.text_input("设置访问密码", type="password", placeholder="至少 4 位")
+                _pw1 = st.text_input("设置访问密码", type="password", placeholder="至少 8 位")
                 _pw2 = st.text_input("确认密码", type="password")
                 _set_submitted = st.form_submit_button("✅ 设置密码", type="primary")
             if _set_submitted:
@@ -434,16 +434,35 @@ if config.AUTH_ENABLED:
             st.stop()
 
         else:
-            # 已有密码：登录
+            # 已有密码：登录（带失败限流：5 次失败后锁定 5 分钟）
+            _max_failures = 5
+            _lock_seconds = 300  # 5 分钟
+            _fail_count = st.session_state.get("_login_fail_count", 0)
+            _lock_until = st.session_state.get("_login_lock_until", 0)
+            _now = time.time()
+
+            if _now < _lock_until:
+                _remaining = int(_lock_until - _now)
+                st.error(f"🔒 登录失败次数过多，已锁定 {_remaining} 秒后重试")
+                st.stop()
+
             with st.form("login_form", clear_on_submit=True):
                 _pw = st.text_input("🔐 请输入访问密码", type="password")
                 _login_submitted = st.form_submit_button("登录", type="primary")
             if _login_submitted:
                 if auth.verify_access_password(_pw):
                     st.session_state["authenticated"] = True
+                    st.session_state["_login_fail_count"] = 0
+                    st.session_state["_login_lock_until"] = 0
                     st.rerun()
                 else:
-                    st.error("密码错误")
+                    _fail_count += 1
+                    st.session_state["_login_fail_count"] = _fail_count
+                    if _fail_count >= _max_failures:
+                        st.session_state["_login_lock_until"] = _now + _lock_seconds
+                        st.error(f"密码错误，已连续失败 {_fail_count} 次，锁定 {_lock_seconds // 60} 分钟")
+                    else:
+                        st.error(f"密码错误，还剩 {_max_failures - _fail_count} 次尝试机会")
             st.caption("提示：忘记密码需联系管理员重置（清空 app_setting 表中 access_password 记录）。")
             st.stop()
 # ---------------- 登录门控结束 ----------------
@@ -486,15 +505,11 @@ if not st.session_state.get("crawl_started_today"):
         st.session_state["crawl_started_today"] = True
         config.logger.info("已启动后台自动爬取线程")
 
-# 向量索引同步：用 session_state 缓存，避免每次 rerun 都调 embedding API
-# 审核操作后会置 _force_vec_sync=True 强制同步；否则每 VEC_SYNC_INTERVAL 秒同步一次
-_VEC_SYNC_INTERVAL = 60  # 秒
+# 向量索引同步：仅在审核写入后（_force_vec_sync=True）触发，避免每会话定时全量同步
 _force = st.session_state.get("_force_vec_sync", False)
-_last = st.session_state.get("_vec_sync_time", 0)
-if _force or (_time.time() - _last) > _VEC_SYNC_INTERVAL:
+if _force:
     try:
         _chroma_stats = topic_matcher.ensure_index_synced()
-        st.session_state["_vec_sync_time"] = _time.time()
         st.session_state["_force_vec_sync"] = False
     except Exception as e:
         _chroma_stats = {"error": str(e), "fallback": True}
@@ -1340,7 +1355,7 @@ with tab_help:
 
 | 栏目 | 用途 | 何时用 |
 |------|------|--------|
-| ✅ 今日审核 | 浏览 AI 筛选的行业稿件，标记 相关/借鉴/无关 | 每天 |
+| ✅ 今日审核 | 浏览 AI 筛选的行业稿件，标记 保存/删除 | 每天 |
 | 🗂 历史已审 | 查看标记过的稿件，展开看全文 | 写稿前查参考 |
 | 📅 常规日历 | 选题提醒 + 投稿记录 + 命中率统计 | 投稿后 |
 | 📚 素材对标 | 选题对标（语义检索）+ 图文素材库 | 写稿前 |
@@ -1352,7 +1367,7 @@ with tab_help:
 ### 🔄 日常工作流
 
 ```
-① 今日审核 → 标记 相关/借鉴/无关
+① 今日审核 → 标记 保存/删除
      ↓
 ② 素材对标 → 选题对标找参考，图文素材找配图
      ↓
@@ -1367,12 +1382,11 @@ with tab_help:
 
 #### ① 今日审核
 - 浏览 AI 筛选后的石油石化行业稿件
-- 🟢 相关：题材可用，保留到历史已审
-- 💡 借鉴：写法可学，保留到历史已审
-- 🚫 无关：直接删除，不保留记录
+- 🟢 保存：题材可用，保留到历史已审
+- 🚫 删除：直接删除，不保留记录（不可恢复）
 
 #### ② 历史已审
-- 所有「相关」「借鉴」稿件都在这里
+- 所有已保存的稿件都在这里
 - 点击折叠条展开看全文，含原文链接
 
 #### ③ 常规日历

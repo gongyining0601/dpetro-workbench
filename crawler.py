@@ -140,10 +140,10 @@ def fetch(url: str) -> str | None:
     try:
         r = sess.get(url, timeout=config.REQUEST_TIMEOUT)
     except requests.RequestException as e:
-        print(f"  [错误] {url} -> {e}")
+        config.logger.error(f"  [错误] {url} -> {e}")
         return None
     if r.status_code != 200:
-        print(f"  [跳过] {url} HTTP {r.status_code}")
+        config.logger.info(f"  [跳过] {url} HTTP {r.status_code}")
         return None
     # 三级编码探测：meta charset > 响应头 > chardet > 域名兜底
     enc = _detect_encoding(r, url)
@@ -248,19 +248,28 @@ def classify_article(src_name: str, col_name: str, title: str, body_text: str = 
     """判定文章是否属于 5 类之一。返回类别名或 None（不属于则丢弃）。
 
     主路径：CATEGORY_MAP 按「源/栏目」精确匹配（零 API 成本）
-    兜底：标题关键词匹配
+    兜底1：标题关键词匹配
+    兜底2：AI 语义过滤（ai_filter.is_relevant），仅在前两者都未命中时调用
     """
     sc = f"{src_name}/{col_name}"
     # 主路径
     for cat, sc_set in config.CATEGORY_MAP.items():
         if sc in sc_set:
             return cat
-    # 兜底：标题关键词
+    # 兜底1：标题关键词
     blob = f"{title} {body_text[:100]}"
     for cat, kws in config.CATEGORY_KEYWORDS.items():
         for kw in kws:
             if kw in blob:
                 return cat
+    # 兜底2：AI 语义过滤（仅在规则无法判定时调用，避免不必要的 API 开销）
+    try:
+        relevant, _ = ai_filter.is_relevant(title=title, body_text=body_text)
+        if relevant:
+            # AI 判定相关但规则无类别匹配时，归入"综合"类别
+            return "综合"
+    except Exception as e:
+        config.logger.warning(f"ai_filter 调用失败，按无关处理: {e}")
     return None
 
 
@@ -498,7 +507,7 @@ def parse_zgsyb_object(html: str) -> dict | None:
     try:
         return json.loads(m.group(1))
     except json.JSONDecodeError as e:
-        print(f"  [错误] epaperObject JSON 解析失败：{e}")
+        config.logger.error(f"  [错误] epaperObject JSON 解析失败：{e}")
         return None
 
 
@@ -522,7 +531,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
         url = src["home"]
 
     if not robots_allows(url):
-        print(f"  [robots 禁止] 中国石油报 {url}")
+        config.logger.info(f"  [robots 禁止] 中国石油报 {url}")
         stats["blocked"] += 1
         return stats
 
@@ -530,7 +539,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
     try:
         r = get_session().get(url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
         if r.status_code != 200:
-            print(f"  [跳过] 中国石油报 HTTP {r.status_code}（{target_date or '当期'}）")
+            config.logger.info(f"  [跳过] 中国石油报 HTTP {r.status_code}（{target_date or '当期'}）")
             return stats
         # 中国石油报 SPA 页 charset=GBK，强制 gbk 解码（apparent_encoding 可能探测错导致乱码）
         spa_html = r.content.decode("gbk", errors="replace")
@@ -542,7 +551,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
             spa_html = r.content.decode("gbk", errors="replace")
         stats["fetched"] += 1
     except requests.RequestException as e:
-        print(f"  [错误] 中国石油报 -> {e}")
+        config.logger.error(f"  [错误] 中国石油报 -> {e}")
         return stats
 
     # 从 final URL 提取日期路径片段：r.url 形如 .../zgsyb/2026-09/29/
@@ -552,14 +561,14 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
 
     obj = parse_zgsyb_object(spa_html)
     if not obj:
-        print("  [错误] 未能从 SPA 页提取 epaperObject，可能页面结构变了")
+        config.logger.error(f"  [错误] 未能从 SPA 页提取 epaperObject，可能页面结构变了")
         return stats
     cur_date_iso = obj.get("curDate") or cur_date_iso
 
     # 【修复日期错位】指定 target_date 时，校验服务端返回的当期日期是否一致。
     # 不一致说明该日期休刊，服务端重定向到了最近一期，应跳过而非用错日期入库。
     if target_date and cur_date_iso and cur_date_iso != target_date.isoformat():
-        print(f"  [跳过] 目标 {target_date} 但当期为 {cur_date_iso}，该日期休刊")
+        config.logger.info(f"  [跳过] 目标 {target_date} 但当期为 {cur_date_iso}，该日期休刊")
         return stats
     if target_date:
         publish_date = target_date.isoformat()
@@ -582,8 +591,8 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
         pg = obj.get(f"page_{bid}", {})
         if pg.get("alias"):
             all_aliases.append(pg["alias"])
-    print(f"  当期 {cur_date_iso}，共 {len(pages)} 版：{all_aliases}")
-    print(f"  按 config alias 候选过滤：{sorted(alias_to_col.keys())}")
+    config.logger.info(f"  当期 {cur_date_iso}，共 {len(pages)} 版：{all_aliases}")
+    config.logger.info(f"  按 config alias 候选过滤：{sorted(alias_to_col.keys())}")
 
     matched_any = False
     for p in pages:
@@ -596,10 +605,10 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
         matched_any = True
         col_id = db.get_column_id(src["name"], col_name)
         if col_id is None:
-            print(f"  [跳过] 未在 db 找到栏目 {src['name']}/{col_name}（重跑 db.init_db() 同步 config）")
+            config.logger.info(f"  [跳过] 未在 db 找到栏目 {src['name']}/{col_name}（重跑 db.init_db() 同步 config）")
             continue
         arts = page.get("data", [])
-        print(f"  [版面 {alias}] {len(arts)} 篇")
+        config.logger.info(f"  [版面 {alias}] {len(arts)} 篇")
         for a in arts:
             title = (a.get("title") or "").strip()
             if not title:
@@ -653,12 +662,12 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
             )
             if added:
                 stats["added"] += 1
-                print(f"  + [{cat}] {title}")
+                config.logger.info(f"  + [{cat}] {title}")
             else:
                 stats["skipped"] += 1
         time.sleep(config.CRAWL_INTERVAL_SECONDS)
     if not matched_any and all_aliases:
-        print(f"  [提示] 当期没有版面 alias 命中 config 栏目名。考虑在 config.py 加这些版面之一。")
+        config.logger.info(f"  [提示] 当期没有版面 alias 命中 config 栏目名。考虑在 config.py 加这些版面之一。")
     return stats
 
 
@@ -788,14 +797,14 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
                 break
             time.sleep(config.CRAWL_INTERVAL_SECONDS)
         if not layout_html:
-            print(f"  [跳过] {col_name} 最近 3 天都抓不到 layout 页")
+            config.logger.info(f"  [跳过] {col_name} 最近 3 天都抓不到 layout 页")
             continue
         col_id = db.get_column_id(src["name"], col["name"])
         if col_id is None:
-            print(f"  [跳过] 未找到栏目 {src['name']}/{col['name']}（重跑 db.init_db() 同步 config）")
+            config.logger.info(f"  [跳过] 未找到栏目 {src['name']}/{col['name']}（重跑 db.init_db() 同步 config）")
             continue
         links = parse_lnd_layout(layout_html, layout_url)[:config.CRAWL_MAX_PER_COLUMN]
-        print(f"  [{col['name']}] 发现 {len(links)} 个文章链接")
+        config.logger.info(f"  [{col['name']}] 发现 {len(links)} 个文章链接")
         for link in links:
             time.sleep(config.CRAWL_INTERVAL_SECONDS)
             if not robots_allows(link.url):
@@ -834,7 +843,7 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
             )
             if added:
                 stats["added"] += 1
-                print(f"  + [{cat}] {art.title}")
+                config.logger.info(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
     return stats
@@ -856,9 +865,9 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
         col_id = db.get_column_id(src["name"], col["name"])
         if col_id is None:
             continue
-        print(f"[{src['name']}/{col['name']}] {url}")
+        config.logger.info(f"[{src['name']}/{col['name']}] {url}")
         if not robots_allows(url):
-            print("  [robots 禁止]")
+            config.logger.info("  [robots 禁止]")
             stats["blocked"] += 1
             continue
         html = fetch(url)
@@ -866,7 +875,7 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
             continue
         stats["fetched"] += 1
         links = extract_links(html, url)[:config.CRAWL_MAX_PER_COLUMN]
-        print(f"  发现 {len(links)} 个候选链接")
+        config.logger.info(f"  发现 {len(links)} 个候选链接")
         for link in links:
             stats["fetched"] += 1
             time.sleep(config.CRAWL_INTERVAL_SECONDS)
@@ -914,7 +923,7 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
             )
             if added:
                 stats["added"] += 1
-                print(f"  + [{cat}] {art.title}")
+                config.logger.info(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
     return stats
@@ -1045,14 +1054,14 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
                 break
             time.sleep(config.CRAWL_INTERVAL_SECONDS)
         if not layout_html:
-            print(f"  [跳过] {col_name} 最近 3 天都抓不到 layout 页")
+            config.logger.info(f"  [跳过] {col_name} 最近 3 天都抓不到 layout 页")
             continue
         col_id = db.get_column_id(src["name"], col["name"])
         if col_id is None:
-            print(f"  [跳过] 未找到栏目 {src['name']}/{col['name']}")
+            config.logger.info(f"  [跳过] 未找到栏目 {src['name']}/{col['name']}")
             continue
         links = parse_rmrb_layout(layout_html, layout_url)[:config.CRAWL_MAX_PER_COLUMN]
-        print(f"  [{col['name']}] 发现 {len(links)} 个文章链接")
+        config.logger.info(f"  [{col['name']}] 发现 {len(links)} 个文章链接")
         for link in links:
             time.sleep(config.CRAWL_INTERVAL_SECONDS)
             if not robots_allows(link.url):
@@ -1091,7 +1100,7 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
             )
             if added:
                 stats["added"] += 1
-                print(f"  + [{cat}] {art.title}")
+                config.logger.info(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
     return stats
@@ -1122,7 +1131,7 @@ def crawl_all(target_date: date | None = None) -> dict:
     for src in config.MEDIA_SOURCES:
         stats["sources"] += 1
         name = src["name"]
-        print(f"\n===== {name} =====")
+        config.logger.info(f"\n===== {name} =====")
         try:
             if name == "中国石油报":
                 s = crawl_zgsyb(src, target_date=target_date)
@@ -1139,7 +1148,7 @@ def crawl_all(target_date: date | None = None) -> dict:
                 stats[k] = stats.get(k, 0) + s.get(k, 0)
         except Exception as e:
             err_msg = f"{name}: {type(e).__name__}: {e}"
-            print(f"[crawl_all] 媒体源出错，跳过：{err_msg}")
+            config.logger.info(f"[crawl_all] 媒体源出错，跳过：{err_msg}")
             stats["errors"].append(err_msg)
     return stats
 
@@ -1163,14 +1172,14 @@ def crawl_date_range(start_date: str | date, end_date: str | date) -> dict:
     total = {"sources": 0, "fetched": 0, "added": 0, "skipped": 0, "blocked": 0,
              "skipped_no_image": 0, "skipped_category": 0, "errors": []}
     total_days = (end_date - start_date).days + 1
-    print(f"\n{'='*60}")
-    print(f"日期范围爬取：{start_date} ~ {end_date}（共 {total_days} 天）")
-    print(f"{'='*60}")
+    config.logger.info(f"\n{'='*60}")
+    config.logger.info(f"日期范围爬取：{start_date} ~ {end_date}（共 {total_days} 天）")
+    config.logger.info(f"{'='*60}")
 
     # 数字报：逐日抓取
     cur = start_date
     while cur <= end_date:
-        print(f"\n>>> 日期 {cur.isoformat()} <<<")
+        config.logger.info(f"\n>>> 日期 {cur.isoformat()} <<<")
         day_stats = crawl_all(target_date=cur)
         for k in ("fetched", "added", "skipped", "blocked",
                    "skipped_no_image", "skipped_category"):
@@ -1180,7 +1189,7 @@ def crawl_date_range(start_date: str | date, end_date: str | date) -> dict:
         time.sleep(2)  # 日期间隔，避免请求过于密集
 
     # 中国化工报：新闻站无日期 URL，抓列表后按日期范围过滤
-    print(f"\n>>> 中国化工报（按日期范围 {start_date}~{end_date} 过滤）<<<")
+    config.logger.info(f"\n>>> 中国化工报（按日期范围 {start_date}~{end_date} 过滤）<<<")
     for src in config.MEDIA_SOURCES:
         if src["name"] == "中国化工报":
             s = crawl_ccin(src, date_range=(start_date, end_date))
@@ -1190,14 +1199,14 @@ def crawl_date_range(start_date: str | date, end_date: str | date) -> dict:
             total["errors"].extend(s.get("errors", []))
             break
 
-    print(f"\n{'='*60}")
-    print(f"日期范围爬取完成：{start_date} ~ {end_date}")
-    print(f"  新增 {total['added']} 条，跳过 {total['skipped']} 条，"
+    config.logger.info(f"\n{'='*60}")
+    config.logger.info(f"日期范围爬取完成：{start_date} ~ {end_date}")
+    config.logger.info(f"  新增 {total['added']} 条，跳过 {total['skipped']} 条，"
           f"无图过滤 {total.get('skipped_no_image', 0)} 条，"
           f"分类过滤 {total.get('skipped_category', 0)} 条")
     if total["errors"]:
-        print(f"  错误 {len(total['errors'])} 条")
-    print(f"{'='*60}")
+        config.logger.info(f"  错误 {len(total['errors'])} 条")
+    config.logger.info(f"{'='*60}")
     return total
 
 
@@ -1248,7 +1257,7 @@ def seed_demo_data() -> int:
     for src_name, col_name, title, url, author, pdate, summary, body in DEMO_ARTICLES:
         col_id = db.get_column_id(src_name, col_name)
         if col_id is None:
-            print(f"  [跳过] 未找到栏目 {src_name}/{col_name}")
+            config.logger.info(f"  [跳过] 未找到栏目 {src_name}/{col_name}")
             continue
         if db.upsert_article(
             col_id, title=title, url=url, author=author,
@@ -1256,7 +1265,7 @@ def seed_demo_data() -> int:
             content_hash=content_hash(body),
         ):
             added += 1
-    print(f"演示数据已灌入 {added} 条")
+    config.logger.info(f"演示数据已灌入 {added} 条")
     return added
 
 
@@ -1268,12 +1277,12 @@ def main():
         cur.execute("SELECT COUNT(*) AS n FROM article")
         n = cur.fetchone()["n"]
     if n == 0 and config.DEMO_SEED_ON_EMPTY:
-        print("数据库为空，先灌入演示数据。要爬真实数据请关闭 DEMO_SEED_ON_EMPTY 并跑 py crawler.py。")
+        config.logger.info("数据库为空，先灌入演示数据。要爬真实数据请关闭 DEMO_SEED_ON_EMPTY 并跑 py crawler.py。")
         seed_demo_data()
         return
-    print("开始爬取…")
+    config.logger.info("开始爬取…")
     stats = crawl_all()
-    print(f"\n完成：媒体源 {stats['sources']}，抓取 {stats['fetched']}，"
+    config.logger.info(f"\n完成：媒体源 {stats['sources']}，抓取 {stats['fetched']}，"
           f"新增 {stats['added']}，跳过(已存在) {stats['skipped']}，"
           f"无图跳过 {stats.get('skipped_no_image', 0)}，"
           f"非5类跳过 {stats.get('skipped_category', 0)}，"

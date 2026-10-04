@@ -1,4 +1,4 @@
-﻿"""云端版向量存储：PG 表 article_embedding + 内存 numpy 暴力 cosine。
+"""云端版向量存储：PG 表 article_embedding + 内存 numpy 暴力 cosine。
 
 2026-09-29 改造（方案 A 上云版）：
 - 旧版从本地 .npz 文件读写 → 改为从 PG 表 article_embedding 读写
@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import psycopg2
 import psycopg2.extras
@@ -34,6 +36,7 @@ class NumpyVectorStore:
         self.path = path
         self.ids: list[str] = []
         self.embs: np.ndarray | None = None  # (N, dim) float32，归一化
+        self._lock = threading.Lock()  # 保护 self.ids / self.embs 的并发读写
         self._load()
 
     # ---------- 持久化（PG 读写） ----------
@@ -59,7 +62,7 @@ class NumpyVectorStore:
             self.ids = ids
             self.embs = embs
         except Exception as e:
-            print(f"[vector_store] 读取 PG 向量表失败，按空库启动：{e}")
+            config.logger.warning(f"[vector_store] 读取 PG 向量表失败，按空库启动：{e}")
             self.ids = []
             self.embs = None
 
@@ -79,7 +82,7 @@ class NumpyVectorStore:
         # 维度变化（换了嵌入模型）→ 清空重建（DELETE 可回滚，与 UPSERT 同事务）
         dim_changed = self.embs is not None and embs.shape[1] != self.embs.shape[1]
         if dim_changed:
-            print(f"[vector_store] 向量维度变化，重建索引")
+            config.logger.info(f"[vector_store] 向量维度变化，重建索引")
 
         # 写 PG（清空 + UPSERT 在同一事务，失败可整体回滚）
         ts = now_iso()
@@ -99,20 +102,21 @@ class NumpyVectorStore:
         if dim_changed:
             self.ids, self.embs = [], None
 
-        # 同步内存索引
-        index = {aid: i for i, aid in enumerate(self.ids)}
-        new_rows: list[np.ndarray] = []
-        new_ids: list[str] = []
-        for aid, vec in zip(ids, embs):
-            if aid in index:
-                self.embs[index[aid]] = vec  # 替换
-            else:
-                new_ids.append(aid)
-                new_rows.append(vec)
-        if new_rows:
-            self.ids.extend(new_ids)
-            stack = np.stack(new_rows)
-            self.embs = stack if self.embs is None else np.vstack([self.embs, stack])
+        # 同步内存索引（加锁防并发竞态）
+        with self._lock:
+            index = {aid: i for i, aid in enumerate(self.ids)}
+            new_rows: list[np.ndarray] = []
+            new_ids: list[str] = []
+            for aid, vec in zip(ids, embs):
+                if aid in index:
+                    self.embs[index[aid]] = vec  # 替换
+                else:
+                    new_ids.append(aid)
+                    new_rows.append(vec)
+            if new_rows:
+                self.ids.extend(new_ids)
+                stack = np.stack(new_rows)
+                self.embs = stack if self.embs is None else np.vstack([self.embs, stack])
 
     def delete(self, ids: list[str]) -> int:
         """删除指定 id，返回实际删除条数。"""
@@ -127,12 +131,13 @@ class NumpyVectorStore:
             )
             removed = cur.rowcount
 
-        # 同步内存索引
+        # 同步内存索引（加锁防并发竞态）
         if self.embs is not None and removed > 0:
-            drop = set(str(i) for i in int_ids)
-            keep_mask = np.array([aid not in drop for aid in self.ids], dtype=bool)
-            self.ids = [aid for aid, k in zip(self.ids, keep_mask) if k]
-            self.embs = self.embs[keep_mask] if keep_mask.any() else None
+            with self._lock:
+                drop = set(str(i) for i in int_ids)
+                keep_mask = np.array([aid not in drop for aid in self.ids], dtype=bool)
+                self.ids = [aid for aid, k in zip(self.ids, keep_mask) if k]
+                self.embs = self.embs[keep_mask] if keep_mask.any() else None
         return removed
 
     def _clear_pg(self) -> None:
