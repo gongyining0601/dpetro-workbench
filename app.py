@@ -480,6 +480,20 @@ with tab_history:
                 if r.get("publish_date"):
                     st.caption(f"发布日期：{r['publish_date']}  |  审核时间：{r['reviewed_at']}")
                 st.markdown(_safe_anchor("原文链接", r['url']))
+                # 展示图片（image_urls 是 JSON 字符串数组）
+                img_urls_raw = r.get("image_urls")
+                if img_urls_raw:
+                    try:
+                        img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
+                        if img_urls:
+                            for u in img_urls[:5]:
+                                u = _normalize_display_url(u)
+                                try:
+                                    st.image(u, width="stretch")
+                                except Exception:
+                                    st.markdown(f"![图片]({u})")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 if r.get("body_text"):
                     st.markdown(_md_escape(r["body_text"]))
                 else:
