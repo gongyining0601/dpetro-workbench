@@ -192,6 +192,7 @@ def revise_article(title: str, body: str, instruction: str) -> dict:
         """相似度兜底：修改后与原文相似度>85% 视为未有效修改。"""
         sim = _similarity(body, result["body"])
         if sim > 0.85:
+            result["ok"] = False
             result["error"] = f"模型修改幅度不足（与原文相似度{sim:.0%}），请调整修改要求后重试"
             config.logger.warning(f"ai_writer.revise: 修改相似度{sim:.2f}过高")
         return result
