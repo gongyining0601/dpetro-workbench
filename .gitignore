@@ -22,6 +22,9 @@ logs/
 # Streamlit 运行时
 .streamlit/secrets.toml
 
+# 图片磁盘缓存（本地下载的 base64 图片，避免提交）
+.img_cache/
+
 # 系统文件
 .DS_Store
 Thumbs.db
@@ -36,5 +39,5 @@ desktop.ini
 # 备份文件
 *.bak
 
-# �����ļ�
+# �����ļ�
 *.bak

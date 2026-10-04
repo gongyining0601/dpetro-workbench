@@ -21,8 +21,10 @@ import json
 import os
 import re
 import base64
+import hashlib
 from datetime import date, timedelta
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import streamlit as st
@@ -57,6 +59,42 @@ def _normalize_display_url(url: str) -> str:
 
 _IMG_CACHE: dict[str, str] = {}
 _MAX_IMG_BYTES = 3 * 1024 * 1024  # 单图 3MB 上限，避免超大图拖慢页面
+# 磁盘持久化缓存目录（Streamlit 重启后仍有效，避免重复下载）
+_IMG_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".img_cache")
+os.makedirs(_IMG_CACHE_DIR, exist_ok=True)
+
+
+def _disk_cache_key(url: str) -> str:
+    """根据 URL 生成磁盘缓存文件名（md5 hash）。"""
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
+
+
+def _disk_cache_path(url: str) -> str:
+    return os.path.join(_IMG_CACHE_DIR, _disk_cache_key(url))
+
+
+def _load_disk_cache(url: str) -> str | None:
+    """从磁盘缓存加载 base64 data URI。
+    返回 None 表示缓存不存在；返回 "" 表示之前下载失败过（缓存失败结果）。
+    """
+    path = _disk_cache_path(url)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def _save_disk_cache(url: str, data_uri: str):
+    """保存 base64 data URI 到磁盘缓存。"""
+    path = _disk_cache_path(url)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(data_uri)
+    except Exception:
+        pass
 
 
 def _is_image_bytes(data: bytes) -> bool:
@@ -87,8 +125,15 @@ def _img_to_data_uri(url: str) -> str:
     """
     if not url:
         return ""
+    # 1. 内存缓存（最快）
     if url in _IMG_CACHE:
         return _IMG_CACHE[url]
+    # 2. 磁盘缓存（重启后仍有效，避免重复下载）
+    disk_val = _load_disk_cache(url)
+    if disk_val is not None:
+        # None=缓存不存在；""=之前下载失败过；非空=成功缓存
+        _IMG_CACHE[url] = disk_val
+        return disk_val
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         # 中国石油报需带 Referer 才能访问图片
@@ -105,6 +150,7 @@ def _img_to_data_uri(url: str) -> str:
         resp = requests.get(req_url, headers=headers, timeout=15, verify=verify, stream=True)
         if resp.status_code != 200:
             _IMG_CACHE[url] = ""
+            _save_disk_cache(url, "")
             config.logger.info("img_fail status=%s url=%s", resp.status_code, url[:120])
             return ""
         content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
@@ -120,6 +166,7 @@ def _img_to_data_uri(url: str) -> str:
             inferred = ext_to_ct.get(ext_match.group(1).lower()) if ext_match else None
             if not inferred:
                 _IMG_CACHE[url] = ""
+                _save_disk_cache(url, "")
                 config.logger.info("img_fail bad_ct=%s url=%s", content_type, url[:120])
                 return ""
             content_type = inferred
@@ -127,19 +174,23 @@ def _img_to_data_uri(url: str) -> str:
         content = resp.content
         if len(content) > _MAX_IMG_BYTES:
             _IMG_CACHE[url] = ""
+            _save_disk_cache(url, "")
             config.logger.info("img_fail too_large=%s url=%s", len(content), url[:120])
             return ""
         # magic bytes 校验：确保下载的真的是图片（防 HTML 错误页）
         if not _is_image_bytes(content):
             _IMG_CACHE[url] = ""
+            _save_disk_cache(url, "")
             config.logger.info("img_fail not_image_bytes url=%s", url[:120])
             return ""
         b64 = base64.b64encode(content).decode()
         data_uri = f"data:{content_type};base64,{b64}"
         _IMG_CACHE[url] = data_uri
+        _save_disk_cache(url, data_uri)
         return data_uri
     except Exception as e:
         _IMG_CACHE[url] = ""
+        _save_disk_cache(url, "")
         config.logger.info("img_fail except=%s url=%s", type(e).__name__, url[:120])
         return ""
 
@@ -152,6 +203,35 @@ def _render_image(url: str):
         st.image(data_uri, width="stretch")
     else:
         st.caption("🖼️ 图片暂不可用（图源限制或已过期）")
+
+
+def _preload_images(urls: list[str], max_workers: int = 8) -> None:
+    """并发预加载图片到缓存（内存+磁盘）。
+
+    在渲染稿件列表前调用，让所有图片同时下载而非串行，
+    大幅减少页面首屏等待时间。已缓存的 URL 会被跳过。
+    """
+    need = []
+    for u in urls:
+        if not u:
+            continue
+        nu = _normalize_display_url(u)
+        if nu in _IMG_CACHE:
+            continue
+        if _load_disk_cache(nu) is not None:
+            # 磁盘有缓存（含失败标记），加载到内存即可
+            _IMG_CACHE[nu] = _load_disk_cache(nu) or ""
+            continue
+        need.append(nu)
+    if not need:
+        return
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_img_to_data_uri, u): u for u in need}
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception:
+                pass
 
 
 def _safe_anchor(label: str, url: str) -> str:
@@ -538,6 +618,18 @@ with tab_review:
                     st.session_state.pop("_pending_del_ids", None)
                     st.rerun()
 
+        # 并发预加载所有稿件图片（避免串行下载拖慢首屏）
+        all_img_urls = []
+        for r in rows:
+            raw = r.get("image_urls")
+            if raw:
+                try:
+                    urls = json.loads(raw) if isinstance(raw, str) else raw
+                    all_img_urls.extend(urls[:5])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        _preload_images(all_img_urls)
+
         # 渲染每条稿件
         for r in rows:
             with st.container(border=True):
@@ -613,6 +705,18 @@ with tab_history:
     if not rows:
         st.info("还没有审核记录。去「今日审核」审几篇试试。")
     else:
+        # 并发预加载所有稿件图片
+        all_img_urls = []
+        for r in rows:
+            raw = r.get("image_urls")
+            if raw:
+                try:
+                    urls = json.loads(raw) if isinstance(raw, str) else raw
+                    all_img_urls.extend(urls[:5])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        _preload_images(all_img_urls)
+
         for r in rows:
             tag = {"保存": "📁 保存"}.get(r["decision"], r["decision"])
             with st.expander(f"{tag} | {r['title']} | {r['source_name']}/{r['column_name']}"):
@@ -918,6 +1022,18 @@ with tab_material:
 
         imgs = _fetch_image_articles_cached(200)
         st.metric("图文稿件", len(imgs))
+        # 并发预加载所有稿件图片
+        all_img_urls = []
+        for a in imgs:
+            raw = a.get("image_urls")
+            if raw:
+                try:
+                    urls = json.loads(raw) if isinstance(raw, str) else raw
+                    all_img_urls.extend(urls[:5])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        _preload_images(all_img_urls)
+
         for a in imgs:
             with st.expander(f"[{a['source_name']}/{a['column_name']}] {a['title']}", expanded=False):
                 st.caption(f"{a['publish_date'] or ''}")
