@@ -20,6 +20,8 @@ _ZHIPU_MODEL = config.ZHIPU_CHAT_MODEL
 # 腾讯云后备（原方案）
 _TC_BASE = config.TENCENTCLOUD_CHAT_URL
 _TC_MODEL = config.TENCENTCLOUD_CHAT_MODEL
+# 修改任务用 DeepSeek-V4-Pro（指令跟随更强，免费额度内）
+_TC_MODEL_PRO = "deepseek-v4-pro"
 
 
 def _extract_json(text: str) -> str | None:
@@ -123,15 +125,32 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
         return {"title": "", "body": "", "ok": False, "error": str(e)}
 
 
+def _similarity(a: str, b: str) -> float:
+    """字符级相似度，用于检测修改是否实质性生效（避免模型原样返回）。"""
+    if not a or not b:
+        return 0.0
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b).ratio()
+
+
 def revise_article(title: str, body: str, instruction: str) -> dict:
-    """基于已有初稿，按用户修改要求让 AI 改写。默认智谱 GLM，失败回退腾讯。"""
+    """按用户修改要求改写新闻稿。
+
+    修改任务主力走腾讯云 DeepSeek-V4-Pro（指令跟随更强，免费额度内），
+    失败回退智谱 GLM-Flash。prompt 强制约束不得原样返回，
+    并加相似度校验兜底：修改后与原文相似度>85% 视为未有效修改。
+    """
     if not instruction.strip():
         return {"title": title, "body": body, "ok": True, "error": ""}
     user_msg = (
-        f"请根据修改要求改写以下新闻稿，保持新闻写作规范，段落间用换行分隔。\n\n"
+        f"你必须根据修改要求实质性改写以下新闻稿，严禁原样返回或仅替换个别字词。\n\n"
         f"修改要求：{instruction}\n\n"
         f"原标题：{title}\n\n原正文：\n{body}\n\n"
-        f"请以 JSON 格式返回，字段为 title（修改后的标题）和 body（修改后的正文）。"
+        f"输出要求：\n"
+        f"1. 必须严格执行修改要求，正文内容需有明显变化\n"
+        f"2. 保持新闻写作规范，段落间用换行分隔\n"
+        f"3. 以 JSON 格式返回，字段为 title（修改后的标题）和 body（修改后的正文）\n"
+        f"4. 只返回 JSON，不要附加解释"
     )
 
     def _call(base: str, api_key: str, model: str) -> dict | None:
@@ -169,23 +188,33 @@ def revise_article(title: str, body: str, instruction: str) -> dict:
             }
         return {"title": title, "body": content, "ok": True, "error": ""}
 
-    zp_key = config.ZHIPU_API_KEY
-    if zp_key:
-        data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
+    def _check(result: dict) -> dict:
+        """相似度兜底：修改后与原文相似度>85% 视为未有效修改。"""
+        sim = _similarity(body, result["body"])
+        if sim > 0.85:
+            result["error"] = f"模型修改幅度不足（与原文相似度{sim:.0%}），请调整修改要求后重试"
+            config.logger.warning(f"ai_writer.revise: 修改相似度{sim:.2f}过高")
+        return result
+
+    # 1) 主力：腾讯云 DeepSeek-V4-Pro（指令跟随强，免费额度内）
+    tc_key = config.TENCENTCLOUD_API_KEY
+    if tc_key:
+        data = _call(_TC_BASE, tc_key, _TC_MODEL_PRO)
         if data:
             try:
-                return _parse(data)
+                return _check(_parse(data))
             except Exception:
                 pass
 
-    config.logger.info("ai_writer.revise: 智谱调用失败，回退腾讯云 deepseek")
-    tc_key = config.TENCENTCLOUD_API_KEY
-    if not tc_key:
-        return {"title": title, "body": body, "ok": False, "error": "智谱与腾讯云 Key 均未配置"}
-    data = _call(_TC_BASE, tc_key, _TC_MODEL)
+    # 2) 后备：智谱 GLM-Flash
+    config.logger.info("ai_writer.revise: 腾讯云调用失败，回退智谱 GLM")
+    zp_key = config.ZHIPU_API_KEY
+    if not zp_key:
+        return {"title": title, "body": body, "ok": False, "error": "腾讯云与智谱 Key 均未配置"}
+    data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
     if not data:
         return {"title": title, "body": body, "ok": False, "error": "修改请求失败"}
     try:
-        return _parse(data)
+        return _check(_parse(data))
     except Exception as e:
         return {"title": title, "body": body, "ok": False, "error": str(e)}
