@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import re
 import json
-import os
 import requests as _requests
 
 import config as _config_zhipu
@@ -37,7 +36,6 @@ def _extract_json_array(text: str) -> list | None:
         elif ch == "]":
             depth -= 1
             if depth == 0:
-                import json
                 try:
                     return json.loads(text[start:i + 1])
                 except json.JSONDecodeError:
@@ -162,19 +160,15 @@ def check(draft_title: str, draft_text: str, caption: str = "") -> dict:
         versions[ver] = advice
     return {"issues": issues or ["未发现明显问题"], "versions": versions}
 
-import os
-import requests as _requests
-
 _TC_BASE = _config_zhipu.TENCENTCLOUD_CHAT_URL
 _MODEL_PROOFREAD = _config_zhipu.TENCENTCLOUD_CHAT_MODEL
 
 
 def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
-    """AI 深度校对：错别字、标点、语病、新闻规范、数字单位、敏感表述。"""
-    api_key = _config_zhipu.TENCENTCLOUD_API_KEY
-    if not api_key:
-        return {"ai_issues": ["未配置 TENCENTCLOUD_API_KEY，跳过 AI 校对"], "ok": False}
+    """AI 深度校对：错别字、标点、语病、新闻规范、数字单位、敏感表述。
 
+    智谱 GLM 优先（免费），失败回退腾讯云 deepseek。
+    """
     sys_prompt = (
         "你是一位资深的中国石油石化行业新闻出版校对编辑。请对稿件进行校对，找出确实存在的问题："
         "1. 错别字、多字漏字（注意'的/得/地'、'帐/账'、'作/做'、'安装'误为'按装'等易错词）"
@@ -196,25 +190,33 @@ def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
         user_msg += f"\n图片说明：{caption}\n"
     user_msg += "\n请按 system prompt 要求的分类 JSON 返回，无问题的类别返回空数组。"
 
-    try:
-        resp = requests.post(
-            _TC_BASE,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": _MODEL_PROOFREAD,
-                "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 1024,
-                "thinking": {"type": "disabled"},
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        # 优先解析分类 dict（新版提示词输出格式）
+    def _call(base: str, api_key: str, model: str):
+        try:
+            resp = _requests.post(
+                base,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 1024,
+                    "thinking": {"type": "disabled"},
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
+    def _parse(data: dict):
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return None
         obj = _extract_json_object(content)
         if isinstance(obj, dict):
             categorized = {}
@@ -223,17 +225,34 @@ def ai_proofread(draft_title: str, draft_text: str, caption: str = "") -> dict:
                     categorized[k] = [str(x) for x in v]
                 else:
                     categorized[k] = [str(v)] if v else []
-            return {"ai_issues": categorized, "ok": True}
-        # 兜底：解析数组（旧格式）
+            return categorized
         arr = _extract_json_array(content)
         if arr is not None:
-            return {"ai_issues": {"其他": arr if arr else ["AI 校对未发现问题"]}, "ok": True}
-        return {"ai_issues": {"其他": [content] if content else ["AI 校对未发现问题"]}, "ok": True}
-    except Exception as e:
-        return {"ai_issues": [f"AI 校对失败：{e}"], "ok": False}
+            return {"其他": arr if arr else ["AI 校对未发现问题"]}
+        return {"其他": [content] if content else ["AI 校对未发现问题"]}
+
+    # 1) 主力：智谱 GLM（免费）
+    zp_key = _config_zhipu.ZHIPU_API_KEY
+    if zp_key:
+        data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
+        if data:
+            parsed = _parse(data)
+            if parsed is not None:
+                return {"ai_issues": parsed, "ok": True}
+
+    # 2) 后备：腾讯云 deepseek
+    tc_key = _config_zhipu.TENCENTCLOUD_API_KEY
+    if not tc_key:
+        return {"ai_issues": ["智谱与腾讯云 Key 均未配置，跳过 AI 校对"], "ok": False}
+    data = _call(_TC_BASE, tc_key, _MODEL_PROOFREAD)
+    if not data:
+        return {"ai_issues": ["AI 校对请求失败（智谱与腾讯云均不可用）"], "ok": False}
+    parsed = _parse(data)
+    if parsed is not None:
+        return {"ai_issues": parsed, "ok": True}
+    return {"ai_issues": ["AI 校对返回格式异常"], "ok": False}
 
 # ===== 三版适配 LLM 量身建议（智谱→腾讯回退，启发式兜底）=====
-import config as _config_zhipu
 
 _ZHIPU_BASE = _config_zhipu.ZHIPU_CHAT_URL
 _ZHIPU_MODEL = _config_zhipu.ZHIPU_CHAT_MODEL
