@@ -22,6 +22,19 @@ from dotenv import load_dotenv
 # 本地开发：从 .env 读环境变量；云端：Streamlit Cloud / GitHub Actions 用 secrets 注入
 load_dotenv()
 
+
+def _clean_key(raw: str) -> str:
+    """清洗 API key：去除首尾空白 + 剔除非 ASCII 字符。
+
+    Streamlit Cloud 等平台从网页复制密钥时可能混入不可见 Unicode 字符
+    （零宽空格、BOM 等），导致 urllib3 用 latin-1 编码 HTTP header 时报
+    "'latin-1' codec can't encode characters"。此处统一清洗为纯 ASCII。
+    """
+    if not raw:
+        return ""
+    return raw.strip().encode("ascii", "ignore").decode("ascii")
+
+
 # ---------- 访问密码开关 ----------
 # 默认开启（AUTH_ENABLED=1）；本地调试可在 .env 里设 AUTH_ENABLED=0 关闭登录门控。
 AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "1") == "1"
@@ -34,13 +47,13 @@ DB_DSN = os.environ.get("DATABASE_URL", "")
 # 2026-10-02 新增：写稿与 AI 初选默认改走智谱 GLM 免费模型（OpenAI 兼容接口）。
 # 注册 https://bigmodel.cn 后在「API 密钥」新建，免费模型永久可用。
 # 模型名：优先 GLM-4.7-Flash；如已下线/变更，以智谱官方「免费模型」列表为准（改 ZHIPU_CHAT_MODEL 即可）。
-ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
+ZHIPU_API_KEY = _clean_key(os.environ.get("ZHIPU_API_KEY", ""))
 ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 ZHIPU_CHAT_MODEL = os.environ.get("ZHIPU_CHAT_MODEL", "GLM-4.7-Flash")
 
 # ---------- Silicon Flow 免费 embedding API ----------
 # 注册 https://siliconflow.cn 后在「账号 → API 密钥」新建，免费送 14 元 ≈ 1.5 亿次嵌入调用
-SF_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
+SF_API_KEY = _clean_key(os.environ.get("SILICONFLOW_API_KEY", ""))
 SF_EMBED_URL = "https://api.siliconflow.cn/v1/embeddings"
 SF_EMBED_MODEL = "BAAI/bge-large-zh-v1.5"  # 升级到 large，比本地 base 更准
 SF_EMBED_DIM = 1024  # bge-large-zh-v1.5 输出维度（base 是 768）
@@ -51,6 +64,12 @@ SF_CHAT_URL = "https://api.siliconflow.cn/v1/chat/completions"
 SF_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 免费，中文表现好，判断相关性够用
 # AI 初选开关：默认开；环境变量 AI_FILTER_ENABLED=0 可临时关（如调试爬虫时）
 AI_FILTER_ENABLED = os.environ.get("AI_FILTER_ENABLED", "1") == "1"
+
+# ---------- 腾讯云 Tencent Cloud 免费 LLM (chat) API（智谱失败时的后备） ----------
+# 注册 https://console.cloud.tencent.com/tencent-maas 后获取 API key
+TENCENTCLOUD_API_KEY = _clean_key(os.environ.get("TENCENTCLOUD_API_KEY", ""))
+TENCENTCLOUD_CHAT_URL = "https://tokenhub.tencentmaas.com/v1/chat/completions"
+TENCENTCLOUD_CHAT_MODEL = "deepseek-v4-flash-202605"
 
 # ---------- 兼容老代码的路径字段（云端弃用，保留避免 import 报错） ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
