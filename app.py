@@ -216,7 +216,7 @@ with st.sidebar:
             f"本次：新增 {_chroma_stats.get('added', 0)} / "
             f"删除 {_chroma_stats.get('removed', 0)}"
         )
-        st.caption("嵌入：BAAI/bge-large-zh-v1.5（Silicon Flow API）")
+        st.caption("嵌入：智谱 embedding-3（Zhipu API）")
         if _chroma_stats.get("error"):
             st.caption(f"⚠️ 同步警告：{_chroma_stats['error']}")
     st.divider()
@@ -574,7 +574,11 @@ with tab_material:
             except ImportError:
                 st.error("缺少 Pillow 依赖，请在虚拟环境执行：.venv\\Scripts\\pip install Pillow")
                 st.stop()
-            os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+            try:
+                os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+            except (OSError, PermissionError):
+                st.error("当前环境文件系统只读，无法保存上传图片。请在本地运行或配置可写目录后使用此功能。")
+                st.stop()
             saved, errors = [], []
             for f in uploaded:
                 # 大小校验
@@ -916,7 +920,7 @@ with tab_help:
 | AI 写稿/校对后备 | 腾讯云 TokenHub（deepseek） | 免费额度 100 万 tokens（90 天） |
 | AI 初选主力 | 智谱 GLM-4.7-Flash | 免费模型，永久可用 |
 | AI 初选后备 | Silicon Flow（Qwen） | 永久免费模型 |
-| 语义嵌入 | Silicon Flow（bge-large-zh-v1.5） | 永久免费模型 |
+| 语义嵌入 | 智谱 embedding-3 | 0.5 元/百万 tokens |
 
 > 目前**零成本运行**。智谱免费模型永久可用；腾讯云额度 90 天后需关注，到期前会报错提醒；智谱 429 限流时会自动回退后备链路，不影响使用。
 
