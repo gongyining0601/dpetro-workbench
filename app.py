@@ -59,6 +59,25 @@ _IMG_CACHE: dict[str, str] = {}
 _MAX_IMG_BYTES = 3 * 1024 * 1024  # 单图 3MB 上限，避免超大图拖慢页面
 
 
+def _is_image_bytes(data: bytes) -> bool:
+    """通过 magic bytes 判断是否为真实图片（防服务器返回 HTML 错误页）。"""
+    if len(data) < 4:
+        return False
+    # JPEG: FF D8 FF
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    # PNG: 89 50 4E 47
+    if data[:4] == b"\x89PNG":
+        return True
+    # GIF: 47 49 46 38
+    if data[:4] == b"GIF8":
+        return True
+    # WebP: 52 49 46 46 .. .. .. .. 57 45 42 50
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return True
+    return False
+
+
 def _img_to_data_uri(url: str) -> str:
     """服务端下载图片转 base64 data URI。
 
@@ -86,23 +105,42 @@ def _img_to_data_uri(url: str) -> str:
         resp = requests.get(req_url, headers=headers, timeout=15, verify=verify, stream=True)
         if resp.status_code != 200:
             _IMG_CACHE[url] = ""
+            config.logger.info("img_fail status=%s url=%s", resp.status_code, url[:120])
             return ""
         content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
-        # 非图片内容（如重定向到 HTML 错误页）视为失败
+        # 部分报纸图片服务器返回 application/octet-stream 而非 image/jpeg，
+        # 需通过扩展名/magic bytes 判断真实类型
         if not content_type.startswith("image/"):
-            _IMG_CACHE[url] = ""
-            return ""
-        # 限制大小
-        content = resp.raw.read(_MAX_IMG_BYTES + 1)
+            # 尝试从 URL 扩展名推断
+            ext_match = re.search(r"\.(jpg|jpeg|png|gif|webp)(?:\.\d+)?$", req_url, re.IGNORECASE)
+            ext_to_ct = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "gif": "image/gif", "webp": "image/webp",
+            }
+            inferred = ext_to_ct.get(ext_match.group(1).lower()) if ext_match else None
+            if not inferred:
+                _IMG_CACHE[url] = ""
+                config.logger.info("img_fail bad_ct=%s url=%s", content_type, url[:120])
+                return ""
+            content_type = inferred
+        # 限制大小（resp.content 会自动解压 gzip，避免 raw 读取压缩字节导致 magic bytes 误判）
+        content = resp.content
         if len(content) > _MAX_IMG_BYTES:
             _IMG_CACHE[url] = ""
+            config.logger.info("img_fail too_large=%s url=%s", len(content), url[:120])
+            return ""
+        # magic bytes 校验：确保下载的真的是图片（防 HTML 错误页）
+        if not _is_image_bytes(content):
+            _IMG_CACHE[url] = ""
+            config.logger.info("img_fail not_image_bytes url=%s", url[:120])
             return ""
         b64 = base64.b64encode(content).decode()
         data_uri = f"data:{content_type};base64,{b64}"
         _IMG_CACHE[url] = data_uri
         return data_uri
-    except Exception:
+    except Exception as e:
         _IMG_CACHE[url] = ""
+        config.logger.info("img_fail except=%s url=%s", type(e).__name__, url[:120])
         return ""
 
 
@@ -893,10 +931,11 @@ with tab_material:
                                 _render_image(u)
                     except (json.JSONDecodeError, TypeError):
                         pass
-                if a.get("summary"):
-                    st.markdown(_md_escape(a["summary"]))
+                # 正文（图片新闻的 summary 是 body_text 的前缀，避免重复只显示 body_text）
                 if a.get("body_text"):
                     st.markdown(_md_escape(a["body_text"][:1000]))
+                elif a.get("summary"):
+                    st.markdown(_md_escape(a["summary"]))
                 if a.get("url"):
                     st.markdown(_safe_anchor("原文链接", a["url"]))
 
