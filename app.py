@@ -588,11 +588,7 @@ with tab_history:
                         img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
                         if img_urls:
                             for u in img_urls[:5]:
-                                u = _normalize_display_url(u)
-                                try:
-                                    st.image(u, width="stretch")
-                                except Exception:
-                                    st.markdown(f"![图片]({u})")
+                                _render_image(u)
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if r.get("body_text"):
@@ -894,11 +890,7 @@ with tab_material:
                         img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
                         if img_urls:
                             for u in img_urls[:5]:
-                                u = _normalize_display_url(u)
-                                try:
-                                    st.image(u, width="stretch")
-                                except Exception:
-                                    st.markdown(f"![图片]({u})")
+                                _render_image(u)
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if a.get("summary"):
