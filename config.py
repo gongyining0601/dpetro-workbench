@@ -137,9 +137,11 @@ REQUEST_TIMEOUT = 15  # 请求超时（秒）
 
 # UA：自报家门，便于媒体侧联系；请在 .env 中配置真实联系邮箱
 # 本地 .env 没设就用默认值（包含项目名+联系邮箱占位）
+# 注意：HTTP header 强制 latin-1 编码，User-Agent 不能含非 ASCII 字符（如中文），
+# 否则 requests 会在所有请求上抛 UnicodeEncodeError。中文说明放在注释里。
 USER_AGENT = os.environ.get(
     "USER_AGENT",
-    "DPetroWorkbench/1.0 (石油图片新闻对标学习工具; +https://github.com/gongyining0601/dpetro-workbench)",
+    "DPetroWorkbench/1.0 (petro news workbench; +https://github.com/gongyining0601/dpetro-workbench)",
 )
 
 # 是否在数据库为空时自动灌入演示数据（便于先看到 UI）
