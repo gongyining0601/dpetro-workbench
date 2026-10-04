@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -275,12 +276,15 @@ def classify_article(src_name: str, col_name: str, title: str, body_text: str = 
 
 # ---------------- URL 规范化（SSL 证书不匹配的域名 https→http） ----------------
 
-# 这些域名的 SSL 证书与主机名不匹配，浏览器加载时报错；HTTP 可正常访问，统一改写。
+# ⚠️ 安全折衷：这些域名的 SSL 证书与主机名不匹配，浏览器加载时报错。
+# 将 https 降级为 http 以保证图片可显示，代价是该来源图片走明文传输。
+# 正确做法是联系媒体方修复证书或换源；此处为功能可用性的临时绕过。
+# 影响范围：仅外部媒体图片资源，不涉及用户数据或凭证。
 _SSL_BROKEN_DOMAINS = ("ccin.com.cn",)
 
 
 def _normalize_url(url: str) -> str:
-    """把 SSL 证书有问题的域名的 https 改成 http，避免浏览器控制台 SSL 警告。"""
+    """安全折衷：SSL 证书不匹配的域名降级为 HTTP（见模块注释）。"""
     if not url or not url.startswith("https://"):
         return url
     for domain in _SSL_BROKEN_DOMAINS:
@@ -1287,6 +1291,13 @@ def main():
           f"无图跳过 {stats.get('skipped_no_image', 0)}，"
           f"非5类跳过 {stats.get('skipped_category', 0)}，"
           f"robots拦截 {stats['blocked']}")
+    # 静默失败告警：有源出错或全部源零抓取时非 0 退出，CI 变红
+    if stats.get("errors"):
+        config.logger.error(f"以下媒体源抓取失败：{stats['errors']}")
+        sys.exit(1)
+    if stats["fetched"] == 0:
+        config.logger.error("所有媒体源均未抓取到任何稿件，疑似异常")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

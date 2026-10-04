@@ -23,6 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Quality gate (syntax + tests)
+        run: |
+          python -m compileall -q .
+          python -m unittest discover -p "test_*.py" -v
+
       - name: Run crawler
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
