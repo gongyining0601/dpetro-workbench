@@ -1217,7 +1217,53 @@ with tab_writing:
     sub_writer, sub_check = st.tabs(["✍️ 行者撰稿", "📝 成稿体检"])
     with sub_writer:
         st.subheader("✍️ 行者撰稿")
-        st.caption("AI 辅助生成新闻稿初稿（智谱 GLM-4.7-Flash，失败回退腾讯云 deepseek）。")
+        st.caption("AI 辅助生成新闻稿初稿（智谱 GLM-4.7-Flash，失败回退腾讯云 deepseek）。"
+                   "稿件自动存入云端草稿库，换电脑、关页面都能找回。")
+
+        # ---------- 我的草稿（云端持久化，避免刷新/关闭即丢失） ----------
+        _pending_del = st.session_state.get("_pending_del_draft")
+        with st.expander("📂 我的草稿（点标题即可继续编辑）", expanded=False):
+            _drafts = db.list_drafts(limit=30)
+            if not _drafts:
+                st.caption("暂无草稿。生成或修改稿件后会自动保存到这里。")
+            else:
+                for _d in _drafts:
+                    _c1, _c2 = st.columns([7, 1])
+                    with _c1:
+                        _label = (_d["title"] or "（无标题）")[:32]
+                        if st.button(_label, key=f"draft_load_{_d['id']}", width="stretch"):
+                            st.session_state["draft_title"] = _d["title"] or ""
+                            st.session_state["draft_body"] = _d["body"] or ""
+                            st.session_state["draft_topic"] = _d["topic"] or ""
+                            st.session_state["draft_angle"] = _d["angle"] or ""
+                            st.session_state["draft_target"] = _d["target_media"] or ""
+                            st.session_state["current_draft_id"] = _d["id"]
+                            st.session_state["_saved_title"] = _d["title"] or ""
+                            st.session_state["_saved_body"] = _d["body"] or ""
+                            st.rerun()
+                        st.caption(
+                            f"{(_d['updated_at'] or '')[:16].replace('T', ' ')} · "
+                            f"{_d['target_media'] or '未指定媒体'}"
+                        )
+                    with _c2:
+                        if st.button("🗑", key=f"draft_del_{_d['id']}"):
+                            st.session_state["_pending_del_draft"] = _d["id"]
+                            st.rerun()
+                if _pending_del:
+                    st.warning(f"⚠️ 确认删除草稿 #{_pending_del}？删除后不可恢复。")
+                    _dc1, _dc2 = st.columns(2)
+                    with _dc1:
+                        if st.button("✅ 确认删除", key="btn_draft_del_ok", type="primary"):
+                            db.delete_draft(_pending_del)
+                            st.session_state.pop("_pending_del_draft", None)
+                            if st.session_state.get("current_draft_id") == _pending_del:
+                                st.session_state["current_draft_id"] = None
+                            st.rerun()
+                    with _dc2:
+                        if st.button("取消", key="btn_draft_del_cancel"):
+                            st.session_state.pop("_pending_del_draft", None)
+                            st.rerun()
+
         with st.form("writer_form"):
             topic = st.text_input("选题关键词*", placeholder="如：春检、安全月、冬季保供")
             col1, col2 = st.columns(2)
@@ -1237,7 +1283,22 @@ with tab_writing:
                 if r["ok"]:
                     st.session_state["draft_title"] = r["title"] or ""
                     st.session_state["draft_body"] = r["body"]
-                    st.toast("初稿已生成，可在下方继续修改", icon="✍️")
+                    st.session_state["draft_topic"] = topic
+                    st.session_state["draft_angle"] = angle
+                    st.session_state["draft_target"] = target
+                    # 生成即入库：避免还没来得及点保存就丢了
+                    _new_id = db.save_draft(
+                        title=r["title"] or "", body=r["body"],
+                        topic=topic, angle=angle, target_media=target,
+                    )
+                    if _new_id:
+                        st.session_state["current_draft_id"] = _new_id
+                        st.session_state["_saved_title"] = r["title"] or ""
+                        st.session_state["_saved_body"] = r["body"]
+                        st.session_state["draft_saved_at"] = db.now_iso()
+                        st.toast("初稿已生成并自动保存，可在下方继续修改", icon="✍️")
+                    else:
+                        st.toast("初稿已生成（保存失败，请手动点保存）", icon="⚠️")
                 else:
                     st.error(f"生成失败：{r['error']}")
 
@@ -1250,6 +1311,28 @@ with tab_writing:
             # 同步编辑后的值回 session_state，供 AI 修改读取
             st.session_state["draft_title"] = cur_title
             st.session_state["draft_body"] = cur_body
+
+            # 自动保存：内容与上次入库值不同就落库，防止刷新/关闭丢稿
+            if (cur_title, cur_body) != (
+                st.session_state.get("_saved_title"), st.session_state.get("_saved_body")
+            ):
+                _did = db.save_draft(
+                    title=cur_title, body=cur_body,
+                    topic=st.session_state.get("draft_topic", ""),
+                    angle=st.session_state.get("draft_angle", ""),
+                    target_media=st.session_state.get("draft_target", ""),
+                    draft_id=st.session_state.get("current_draft_id"),
+                )
+                if _did:
+                    st.session_state["current_draft_id"] = _did
+                    st.session_state["_saved_title"] = cur_title
+                    st.session_state["_saved_body"] = cur_body
+                    st.session_state["draft_saved_at"] = db.now_iso()
+            _saved_at = st.session_state.get("draft_saved_at")
+            if _saved_at:
+                st.caption(f"💾 已自动保存（{_saved_at[11:19]} UTC）· 存于云端草稿库，可随时找回")
+            else:
+                st.caption("尚未保存")
 
             st.markdown("#### 🔧 AI 修改")
             rev_instr = st.text_area(
@@ -1275,9 +1358,28 @@ with tab_writing:
                             st.error(f"修改失败：{rr['error']}")
             with rc2:
                 if st.button("🗑 清空稿件"):
-                    st.session_state.pop("draft_title", None)
-                    st.session_state.pop("draft_body", None)
+                    # 二次确认：原来一点就清，手滑即丢稿
+                    st.session_state["_confirm_clear_draft"] = True
                     st.rerun()
+            if st.session_state.get("_confirm_clear_draft"):
+                st.warning(
+                    "⚠️ 确认清空当前稿件？云端草稿库里的历史版本不受影响，"
+                    "可在上方「我的草稿」中找回。"
+                )
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("✅ 确认清空", key="btn_clear_draft_ok", type="primary"):
+                        st.session_state.pop("draft_title", None)
+                        st.session_state.pop("draft_body", None)
+                        st.session_state["current_draft_id"] = None
+                        st.session_state.pop("_saved_title", None)
+                        st.session_state.pop("_saved_body", None)
+                        st.session_state.pop("_confirm_clear_draft", None)
+                        st.rerun()
+                with cc2:
+                    if st.button("取消", key="btn_clear_draft_cancel"):
+                        st.session_state.pop("_confirm_clear_draft", None)
+                        st.rerun()
             st.caption("提示：可直接在正文框手动编辑，再提修改要求让 AI 改；修改会覆盖当前稿件。")
     # ----- Tab 8: 使用说明 -----
 
@@ -1406,6 +1508,9 @@ with tab_help:
 
 #### ⑤ 撰稿中心
 - **行者撰稿**：输入选题关键词、写作角度、目标媒体，AI 生成新闻稿初稿
+- **稿件会自动保存**：初稿生成后即存入云端草稿库；之后每次编辑也会自动存。
+  刷新页面、关掉标签页、换台电脑都不丢，可在「📂 我的草稿」中点标题继续写
+- **清空稿件有二次确认**：清空只影响当前编辑区，云端历史草稿仍可找回
 - **成稿体检**：
   - 快速模式：检查模糊时间、空泛数据、绝对化用词
   - 深度模式：规则检查 + AI 校对

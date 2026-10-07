@@ -529,3 +529,70 @@ def cleanup_non_photo_news() -> int:
     if deleted:
         config.logger.info(f"清理 {deleted} 条历史问题稿件（非图片新闻/坏元数据）")
     return deleted
+
+
+# ---------------- 撰稿草稿（draft 表） ----------------
+# 背景：撰稿中心此前只把稿件放在 st.session_state（浏览器内存），
+# 刷新/关闭/换设备即丢失，且无历史可查。此处落到数据库，支持自动保存与回溯。
+
+def save_draft(*, title: str, body: str, topic: str = "", angle: str = "",
+               target_media: str = "", draft_id: int | None = None,
+               status: str = "draft") -> int | None:
+    """保存草稿。传 draft_id 则更新，否则新建。返回草稿 id，失败返回 None。
+
+    撰稿中心的自动保存与本函数的 update 分支配合，实现"边写边存"。
+    """
+    ts = now_iso()
+    try:
+        with get_conn() as c:
+            cur = conn_cursor(c)
+            if draft_id:
+                cur.execute(
+                    "UPDATE draft SET title=%s, body=%s, topic=%s, angle=%s,"
+                    " target_media=%s, status=%s, updated_at=%s WHERE id=%s",
+                    (title, body, topic, angle, target_media, status, ts, draft_id),
+                )
+                if cur.rowcount:
+                    return draft_id
+                # id 不存在（可能已被删除）→ 退回新建
+            cur.execute(
+                "INSERT INTO draft(title, body, topic, angle, target_media,"
+                " status, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (title, body, topic, angle, target_media, status, ts, ts),
+            )
+            row = cur.fetchone()
+            return int(row["id"]) if row else None
+    except Exception as e:
+        config.logger.error(f"保存草稿失败：{e}")
+        return None
+
+
+def list_drafts(limit: int = 50) -> list:
+    """草稿列表，最近修改的在前。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT id, title, body, topic, angle, target_media, status,"
+            " created_at, updated_at FROM draft ORDER BY updated_at DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def get_draft(draft_id: int):
+    """读取单条草稿，不存在返回 None。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT id, title, body, topic, angle, target_media, status,"
+            " created_at, updated_at FROM draft WHERE id=%s", (draft_id,)
+        )
+        return cur.fetchone()
+
+
+def delete_draft(draft_id: int) -> bool:
+    """删除草稿。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute("DELETE FROM draft WHERE id=%s", (draft_id,))
+        return cur.rowcount > 0
