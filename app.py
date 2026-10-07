@@ -1274,10 +1274,7 @@ with tab_writing:
                                 st.rerun()
                             else:
                                 st.error(f"删除失败（草稿仍在）：{_del_err or '未找到该草稿'}")
-                            st.session_state.pop("_pending_del_draft", None)
-                            if st.session_state.get("current_draft_id") == _pending_del:
-                                st.session_state["current_draft_id"] = None
-                            st.rerun()
+                                st.session_state.pop("_pending_del_draft", None)
                     with _dc2:
                         if st.button("取消", key="btn_draft_del_cancel"):
                             st.session_state.pop("_pending_del_draft", None)
