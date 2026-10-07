@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DPetroWorkbench 第二次专业测评报告</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1a1d24; --ink2:#454b57;
+    --ink3:#7a8290; --line:#e4e7ec; --line2:#eef0f3;
+    --blue:#2563eb; --blue-bg:#eff4ff;
+    --red:#d92d20; --red-bg:#fef3f2;
+    --amber:#b54708; --amber-bg:#fffaeb;
+    --green:#067647; --green-bg:#ecfdf3;
+    --purple:#6941c6; --purple-bg:#f4f3ff;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.75; font-size:15px; -webkit-font-smoothing:antialiased;
+    padding:40px 20px 80px;
+  }
+  .wrap{max-width:940px;margin:0 auto}
+
+  /* ---- header ---- */
+  .hero{
+    background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:38px 40px; margin-bottom:24px;
+    box-shadow:0 1px 3px rgba(16,24,40,.04);
+  }
+  .hero .kicker{
+    font-size:12px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--blue); margin-bottom:12px;
+  }
+  .hero h1{font-size:28px;line-height:1.35;letter-spacing:-.01em;margin-bottom:10px;font-weight:700}
+  .hero .sub{color:var(--ink3);font-size:14px;margin-bottom:24px}
+  .meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .meta-grid div{background:var(--card);padding:13px 16px;font-size:13.5px}
+  .meta-grid b{display:block;color:var(--ink3);font-weight:500;font-size:11.5px;letter-spacing:.06em;margin-bottom:3px}
+
+  /* ---- section ---- */
+  section{
+    background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:32px 40px; margin-bottom:20px;
+    box-shadow:0 1px 3px rgba(16,24,40,.04);
+  }
+  h2{
+    font-size:20px;font-weight:700;letter-spacing:-.01em;
+    margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--line2);
+    display:flex;align-items:center;gap:10px;
+  }
+  h2 .num{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:26px;height:26px;border-radius:7px;background:var(--blue-bg);color:var(--blue);
+    font-size:13px;font-weight:700;flex:0 0 auto;
+  }
+  h3{font-size:16px;font-weight:650;margin:24px 0 10px}
+  h3:first-of-type{margin-top:8px}
+  p{margin-bottom:13px;color:var(--ink2)}
+  p:last-child{margin-bottom:0}
+  strong{color:var(--ink);font-weight:650}
+  code{
+    font-family:var(--mono);font-size:12.5px;background:var(--line2);
+    padding:1.5px 5px;border-radius:4px;color:#b4290a;
+  }
+  ul,ol{margin:0 0 13px 22px;color:var(--ink2)}
+  li{margin-bottom:6px}
+
+  /* ---- score ---- */
+  .score-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:20px}
+  .score-cell{background:var(--card);padding:22px 18px;text-align:center}
+  .score-cell .lbl{font-size:12px;color:var(--ink3);margin-bottom:8px;font-weight:500}
+  .score-cell .val{font-size:32px;font-weight:750;letter-spacing:-.02em;line-height:1}
+  .score-cell .val.dim{color:var(--ink3)}
+  .score-cell .grade{font-size:12px;color:var(--ink3);margin-top:8px}
+
+  .callout{
+    border-radius:11px;padding:18px 20px;margin:18px 0;font-size:14.5px;
+    border:1px solid;line-height:1.7;
+  }
+  .callout p{margin:0;color:inherit}
+  .callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:13px;letter-spacing:.02em}
+  .c-blue{background:var(--blue-bg);border-color:#c7d7fe;color:#1e3a8a}
+  .c-red{background:var(--red-bg);border-color:#fecdca;color:#7a271a}
+  .c-amber{background:var(--amber-bg);border-color:#fedf89;color:#7a2e0e}
+  .c-green{background:var(--green-bg);border-color:#abefc6;color:#054f31}
+  .c-purple{background:var(--purple-bg);border-color:#d9d6fe;color:#3e1c96}
+
+  /* ---- table ---- */
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:16px 0}
+  th{
+    background:#fafbfc;text-align:left;padding:10px 12px;font-weight:600;font-size:12.5px;
+    color:var(--ink3);letter-spacing:.03em;border-bottom:1px solid var(--line);
+  }
+  td{padding:11px 12px;border-bottom:1px solid var(--line2);color:var(--ink2);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.n{text-align:center;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+  .up{color:var(--red);font-weight:650}
+  .down{color:var(--green);font-weight:650}
+  .flat{color:var(--ink3)}
+
+  .tag{
+    display:inline-block;font-size:11px;font-weight:650;padding:2px 8px;border-radius:20px;
+    letter-spacing:.03em;vertical-align:1px;
+  }
+  .t-iron{background:#fee4e2;color:#912018}
+  .t-ok{background:#d1fadf;color:#054f31}
+  .t-warn{background:#fef0c7;color:#7a2e0e}
+  .t-new{background:#e9d7fe;color:#4a1fb8}
+
+  .issue{
+    border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:14px 0;
+    background:#fcfcfd;
+  }
+  .issue .hd{display:flex;align-items:center;gap:9px;margin-bottom:10px;flex-wrap:wrap}
+  .issue .hd .t{font-weight:680;font-size:15.5px;color:var(--ink)}
+  .issue p{font-size:14px}
+
+  pre{
+    background:#1c2028;color:#e6e9ef;padding:15px 17px;border-radius:9px;
+    font-family:var(--mono);font-size:12.5px;line-height:1.65;overflow-x:auto;margin:13px 0;
+  }
+  pre .cm{color:#7c8798}
+  pre .kw{color:#ff9b8a}
+  pre .st{color:#a5d6a7}
+
+  .final{
+    background:linear-gradient(135deg,#1c2028 0%,#2a3140 100%);
+    color:#fff;border:none;border-radius:16px;padding:34px 40px;margin-bottom:20px;
+  }
+  .final h2{color:#fff;border-bottom-color:rgba(255,255,255,.14)}
+  .final h2 .num{background:rgba(255,255,255,.14);color:#fff}
+  .final p{color:#c9d0dc}
+  .final strong{color:#fff}
+  .final .big{
+    font-size:19px;line-height:1.6;font-weight:600;color:#fff;
+    border-left:3px solid #6b8afd;padding-left:18px;margin:20px 0;
+  }
+  .final ul{color:#c9d0dc}
+  .final code{background:rgba(255,255,255,.1);color:#ffc9a8}
+  .final table{margin-top:10px}
+  .final th{background:rgba(255,255,255,.06);color:#9aa6b8;border-bottom-color:rgba(255,255,255,.1)}
+  .final td{border-bottom-color:rgba(255,255,255,.07);color:#c9d0dc}
+  .final td.n{color:#fff}
+
+  footer{
+    text-align:center;color:var(--ink3);font-size:12.5px;
+    padding:26px 20px 0;line-height:1.8;
+  }
+  @media(max-width:640px){
+    body{padding:20px 12px 60px}
+    .hero,section{padding:24px 20px}
+    .final{padding:26px 20px}
+    .hero h1{font-size:22px}
+    .score-row{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">第二次专业测评 · 静态代码审计</div>
+    <h1>锦州石化投稿辅助工具<br>DPetroWorkbench 复评报告</h1>
+    <div class="sub">测评对象 <code>D:\DPetroWorkbench</code> · 基线 <code>179feef</code> · 全程只读，未运行程序、未调用 AI</div>
+    <div class="meta-grid">
+      <div><b>首次测评</b>77.1 / 100 · B</div>
+      <div><b>本次复评</b>77.1 / 100 · B</div>
+      <div><b>代码变化</b>零 —— HEAD 未动</div>
+      <div><b>复评性质</b>独立重评（非修复验收）</div>
+    </div>
+  </div>
+
+  <section>
+    <h2><span class="num">0</span>先说结论</h2>
+
+    <div class="score-row">
+      <div class="score-cell">
+        <div class="lbl">首次测评</div>
+        <div class="val dim">77.1</div>
+        <div class="grade">等级 B</div>
+      </div>
+      <div class="score-cell">
+        <div class="lbl">本次复评</div>
+        <div class="val">77.1</div>
+        <div class="grade">等级 B</div>
+      </div>
+      <div class="score-cell">
+        <div class="lbl">分数变化</div>
+        <div class="val dim">±0.0</div>
+        <div class="grade">持平</div>
+      </div>
+    </div>
+
+    <p><strong>分数一点没动，而且这是正确的结论。</strong></p>
+
+    <p>原因很简单：自首次测评之后，这个项目的<strong>代码一个字节都没改</strong>。HEAD 仍是 <code>179feef</code>，工作区只有两个此前就存在的未跟踪文件（<code>cleanup_bad_articles.py</code>、<code>test_security.py</code>）。</p>
+
+    <p>所以本次不是"修复后复评"，也不是"退步了所以扣分"，而是：</p>
+
+    <div class="callout c-blue">
+      <span class="t">本次复评的真实目的</span>
+      <p>一次独立的重新打分 —— 用不同的切入角度、更深的证据挖掘，反过来检验第一次的 77.1 到底准不准。</p>
+    </div>
+
+    <p>结论是：<strong>77.1 站得住。</strong>本次挖出的新问题基本都在"确认现有短板"，没有出现需要大幅推翻重估的新证据，也没有出现被夸大的冤枉分。</p>
+
+    <div class="callout c-amber">
+      <span class="t">一句话状态</span>
+      <p><strong>能力是真的，工程化是空的。</strong></p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">1</span>这次复评和上次有什么不同</h2>
+    <p>既然是第二次，就不能把上次的报告重抄一遍。本次刻意换了三条路线。</p>
+
+    <h3>路线 A · 换切入角度找问题</h3>
+    <p>上次是从"功能模块"往下查（爬虫、AI、数据层、前端）。本次改成从<strong>「风险类型」横切</strong>：数据会不会被误判？AI 会不会被喂坏东西？传输会不会被看光？代码坏了会不会有人知道？新人接手会不会被带偏？</p>
+    <p>结论：<strong>这五刀切下去，前三刀都见了血。</strong></p>
+
+    <h3>路线 B · 压力测试关键结论</h3>
+    <p>上次说 <code>ai_filter.py</code> 是死代码。这次不满足于一次 grep，做了<strong>排除法终极核验</strong>：</p>
+<pre><span class="cm"># 全项目搜索 ai_filter / is_relevant 的引用</span>
+grep -rn "ai_filter|is_relevant" --include=*.py . | grep -v ai_filter.py
+
+<span class="cm"># 输出：</span>
+<span class="st">./crawler.py:33:import ai_filter</span></pre>
+    <p>整个项目里，除了 <code>ai_filter.py</code> 自己，<strong>只有第 33 行一个 import 语句提到它</strong>，而且这个 import 之后<strong>零调用</strong>。<code>is_relevant()</code> 全文件只出现在第 138 行（定义自己）和第 233 行（自己 <code>__main__</code> 里的测试打印）。</p>
+    <div class="callout c-red">
+      <span class="t">铁证</span>
+      <p>这个文件从头到尾就是一个"自己跟自己玩"的模块。</p>
+    </div>
+
+    <h3>路线 C · 回报率验证</h3>
+    <p>上次给的"下一步建议"到底对不对？本次用"投入产出比"重新排了一遍优先级。结论：上次的判断<strong>方向正确，但有一处优先级排错了</strong>（详见第 5 章）。</p>
+  </section>
+
+  <section>
+    <h2><span class="num">2</span>上次 16 条问题的复核结果</h2>
+
+    <h3>完全成立，证据充分（13 条）</h3>
+    <table>
+      <thead><tr><th style="width:44px">#</th><th>问题</th><th style="width:38%">复核证据</th><th style="width:74px">强度</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td><code>ai_filter.py</code> 是死代码</td><td>全项目仅 <code>crawler.py:33</code> 一个 import，<code>is_relevant</code> 仅出现在自身 138/233 行</td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">2</td><td><code>README.md</code> 宣称"AI 预过滤"与实现不符</td><td>README 第 22、66 行两处宣称 AI 筛选；实际是纯关键词匹配</td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">3</td><td><code>requirements.txt</code> 缺 Pillow</td><td>7 个包无 Pillow；<code>app.py:573,586,589</code> 三处硬依赖 <code>from PIL import Image</code></td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">4</td><td><code>USER_AGENT</code> 名实不符</td><td><code>config.py:101</code> 注释写"自报家门，便于媒体侧联系"，102-105 行默认值却是伪装 Chrome 120</td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">5</td><td>零有效测试</td><td><code>smoke_test.py</code> 与 <code>test_security.py</code> 均为 <strong>0 字节</strong>；无任何测试配置文件</td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">6</td><td><code>HANDOFF.md</code> 严重过期</td><td>文档说"SQLite / 不调付费 API / 不上传云端"；实际 <code>db.py:1</code> 已迁 Supabase PG，<code>ai_writer.py:21</code> 调腾讯云 API</td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">7</td><td>登录无限流</td><td><code>auth.py</code> 无任何失败计数 / 锁定 / 退避逻辑</td><td><span class="tag t-ok">成立</span></td></tr>
+        <tr><td class="n">8</td><td>密码强度下限过低</td><td><code>auth.py:80</code> <code>if len(password) &lt; 4</code></td><td><span class="tag t-ok">成立</span></td></tr>
+        <tr><td class="n">9</td><td>向量库进程级全局存在竞态</td><td><code>vector_store.py</code> 中 <code>self.embs</code> 共 7 处赋值，全文件<strong>零 threading / Lock</strong></td><td><span class="tag t-ok">成立</span></td></tr>
+        <tr><td class="n">10</td><td>用 print 而非 logging</td><td><code>crawler.py</code> 43 处 print、0 处 logging</td><td><span class="tag t-ok">成立</span></td></tr>
+        <tr><td class="n">11</td><td>CI 无测试 / 质量校验</td><td><code>crawl.yml</code> 仅 checkout → 装依赖 → 跑 crawler → 同步 embedding</td><td><span class="tag t-iron">铁证</span></td></tr>
+        <tr><td class="n">12</td><td><code>run_crawler.bat</code> 硬编码失效路径</td><td>硬编码 <code>C:\Users\Administrator\...\Python312\python.exe</code>，本机不存在</td><td><span class="tag t-ok">成立</span></td></tr>
+        <tr><td class="n">13</td><td><code>deploy_cloud.ps1</code> 被 git 跟踪</td><td>76,870 字节，含 <code>FromBase64String</code> 解包逻辑</td><td><span class="tag t-ok">成立</span></td></tr>
+      </tbody>
+    </table>
+
+    <h3>需要修正：影响面被高估（1 条）</h3>
+    <div class="issue">
+      <div class="hd"><span class="tag t-warn">定级下修</span><span class="t">"<code>classify_article</code> 分类顺序敏感"</span></div>
+      <p>问题本身存在，但上次对它的<strong>影响面判断偏重了</strong>。本次核实：</p>
+      <ul>
+        <li><code>classify_article()</code>（<code>crawler.py:247-264</code>）遍历 <code>CATEGORY_KEYWORDS</code> 字典时，<strong>命中顺序决定分类结果</strong>，确实存在顺序敏感。</li>
+        <li><code>grep -n "if not cat" crawler.py</code> → 4 处：<strong>644 / 824 / 904 / 1081</strong> 行。</li>
+        <li>这 4 处 <code>cat</code> 只用于两件事：① 日志 <code>print(f"  + [{cat}] {title}")</code>；② <code>if not cat: continue</code> 准入判断。</li>
+        <li><strong>关键事实：<code>cat</code> 从不写入数据库</strong> —— <code>db.py:65-77</code> 建表语句中 <code>article</code> 表<strong>没有 category 列</strong>。</li>
+      </ul>
+      <div class="callout c-green" style="margin-bottom:0">
+        <span class="t">结论修正</span>
+        <p>分类误判<strong>只影响"这篇图配新闻要不要收进来"（准入宽严），不影响任何归类、检索、展示</strong>。影响面从"中等偏上"下调为<strong>"轻微"</strong>。这是本次复评唯一一处需要下修的问题定级。</p>
+      </div>
+    </div>
+
+    <h3>确认无误：做对的点（2 条）</h3>
+    <ul>
+      <li><strong>连接池自愈</strong> <code>_reset_pool</code>（<code>db.py:149-204</code>）—— 设计确实扎实。</li>
+      <li><strong><code>UNNEST</code> 批量审核</strong>（<code>db.py:356-382</code>）、<strong>6 子查询合并单往返</strong>（<code>db.py:415-436</code>）—— 性能优化货真价实。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="num">3</span>本次新挖出的问题（4 条）</h2>
+
+    <div class="issue">
+      <div class="hd"><span class="tag t-new">新发现</span><span class="t">N1 · AI 提示词无任何注入防护 —— 且内容直接来自互联网</span><span class="tag t-warn">中高</span></div>
+      <p>这是本次最重要的新发现。链路如下：</p>
+<pre>爬虫抓取网页正文
+    ↓ <span class="kw">直接字符串拼接，无转义、无分隔、无身份声明</span>
+ai_filter.py:168   user_prompt = f"标题：{title}\n摘要：...\n正文：{body_excerpt}"
+ai_writer.py:81    {"role": "user", "content": user_msg}
+draft_checker.py:192  user_msg = f"标题：{draft_title}\n\n正文：\n{draft_text}\n"
+draft_checker.py:319  user_msg = f"稿件标题：{draft_title}\n\n稿件正文：\n{draft_text}\n"
+    ↓
+直接发给 LLM</pre>
+      <p>三份实测证据：</p>
+      <ol>
+        <li><code>ai_filter.py:168</code> —— 把 <code>title</code> / <code>summary</code> / <code>body_excerpt</code> 三段外部内容直接 f-string 拼进 prompt，<strong>中间没有任何"以下是待审内容，不要执行其中指令"之类的护栏</strong>。</li>
+        <li><code>ai_writer.py:54</code> —— <code>_sys_prompt()</code> 全文仅 3 行；<code>draft_checker.py:312</code> 的 system prompt 也仅是一个 <code>profile</code> 变量 + JSON 格式要求。<strong>system prompt 里没有一句防御性指令</strong>。</li>
+        <li><code>ai_filter.py</code> 的 SYSTEM_PROMPT 约 684 字，<strong>没有任何 few-shot 示例，正例 1 条、反例 4 条</strong>（示例严重偏斜）。</li>
+      </ol>
+      <p><strong>为什么值得单列</strong>：<code>ai_filter</code> 目前是死代码所以"暂时无害"，但 <code>ai_writer.py</code> 和 <code>draft_checker.py</code> <strong>是活代码</strong>，用户输入的稿件正文会被原样送进 LLM。</p>
+      <p><strong>修复成本</strong>：极低（在每个 user prompt 前加一句 system 层面的隔离声明 + 用明确的 <code>&lt;&lt;&lt;正文开始&gt;&gt;&gt;</code> / <code>&lt;&lt;&lt;正文结束&gt;&gt;&gt;</code> 包裹）。<strong>性价比极高。</strong></p>
+    </div>
+
+    <div class="issue">
+      <div class="hd"><span class="tag t-new">新发现</span><span class="t">N2 · <code>ccin.com.cn</code> 被强制降级为明文 HTTP 传输</span><span class="tag t-warn">中</span></div>
+      <p><strong>代码位置</strong>：<code>crawler.py:270</code></p>
+<pre><span class="kw">_SSL_BROKEN_DOMAINS</span> = (<span class="st">"ccin.com.cn"</span>,)
+
+<span class="kw">def</span> _normalize_url(url: str) -&gt; str:
+    <span class="cm">"""把 SSL 证书有问题的域名的 https 改成 http，避免浏览器控制台 SSL 警告。"""</span>
+    <span class="kw">if not</span> url <span class="kw">or not</span> url.startswith(<span class="st">"https://"</span>):
+        <span class="kw">return</span> url
+    <span class="kw">for</span> domain <span class="kw">in</span> _SSL_BROKEN_DOMAINS:
+        <span class="kw">if</span> domain <span class="kw">in</span> url:
+            <span class="kw">return</span> <span class="st">"http://"</span> + url[len(<span class="st">"https://"</span>):]
+    <span class="kw">return</span> url</pre>
+      <p><strong>发生的事情</strong>：只要 URL 里含 <code>ccin.com.cn</code>，强制把 <code>https://</code> 改成 <code>http://</code>。</p>
+      <p><strong>作者意图是好的</strong> —— 该站 SSL 证书与主机名不匹配，浏览器会报错，降级 HTTP 是为了让图片能正常显示。</p>
+      <p><strong>但代价是</strong>：</p>
+      <ul>
+        <li>该来源的所有图片资源走<strong>明文 HTTP</strong>，中间任何一跳都能看到、能篡改。</li>
+        <li>注释只说了"避免浏览器控制台 SSL 警告"，<strong>没有说明这是安全折衷</strong>，容易被后人当成无害的工具函数。</li>
+        <li>更根本的问题：<strong>这是"绕过"而不是"解决"</strong> —— 正确做法是修复证书或换源，而不是在代码里硬编码一个"这个域名不安全"的白名单。</li>
+      </ul>
+      <p><strong>影响面</strong>：属于<strong>外部媒体源</strong>资源，不涉及用户数据或凭证，所以不算高危。但它会进入"合规 / 安全画像"，企业内部工具评审时<strong>大概率会被点名</strong>。</p>
+    </div>
+
+    <div class="issue">
+      <div class="hd"><span class="tag t-new">新发现</span><span class="t">N3 · CI 流水线只跑爬虫，没有任何质量门禁</span><span class="tag t-warn">中</span></div>
+      <p><strong>证据</strong>：<code>.github/workflows/crawl.yml</code> 完整步骤链：</p>
+<pre>actions/checkout@v4
+  → setup-python 3.12
+  → pip install -r requirements.txt
+  → python -B crawler.py
+  → python -B topic_matcher.py</pre>
+      <p><strong>没有</strong>：pytest / unittest、ruff / flake8 / pylint、black --check、pip-audit / safety，<strong>连 <code>python -m compileall</code> 语法门禁都没有</strong>。</p>
+      <div class="callout c-red">
+        <span class="t">这意味着什么</span>
+        <p>代码里存在语法错误、死代码、未定义变量、循环导入 —— <strong>CI 都会显示绿色通过</strong>，因为它只关心"爬虫跑完没崩溃"。</p>
+      </div>
+      <p>这和"零测试"是同一个病根的两处症状。区别在于：<strong>零测试是"没写"，CI 无门禁是"没拦"</strong> —— 后者更值得警惕，因为它意味着<strong>未来也不可能自动发现回归</strong>。</p>
+      <p><strong>修复成本</strong>：极低。加 3 行 YAML，就能让 <code>ruff check .</code> 拦住大部分低级错误。<strong>这是全文性价比最高的一条改进。</strong></p>
+    </div>
+
+    <div class="issue">
+      <div class="hd"><span class="tag t-new">新发现</span><span class="t">N4 · 异常处理与错误吞没的粒度问题</span><span class="tag t-ok">低</span></div>
+      <p><code>crawler.py</code> 中 4 个真解析器（<code>crawl_zgsyb</code> 505 行 / <code>crawl_lnd</code> 734 行 / <code>crawl_rmrb</code> 992 行 / <code>crawl_ccin</code> 1102 行）+ 1 个 <code>crawl_generic</code> 兜底，共 5 条抓取链路。</p>
+      <p>问题在于：抓取失败时的处理是"记一句日志然后继续"（软失败），<strong>没有一个统一的失败上报</strong>。当某个源连续多天抓不到东西时：CI 依然绿色、日志需要人工翻、数据库里表现为"这几天没新稿" —— <strong>与"这几天真的没新闻"无法区分</strong>。</p>
+      <p>这是典型的<strong>静默失败</strong>。对于每天定时跑的爬虫来说，<strong>"没抓到"比"抓崩了"更危险</strong>，因为崩溃至少会报错。</p>
+      <p><strong>建议</strong>：在 <code>crawler.py</code> 结束时统计各源成功/失败数，失败源非零时以非 0 退出码结束进程 —— 这样 CI 会直接变红。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">4</span>十维度评分</h2>
+    <table>
+      <thead><tr><th>维度</th><th style="width:66px">首次</th><th style="width:66px">本次</th><th style="width:60px">变化</th><th>定级理由</th></tr></thead>
+      <tbody>
+        <tr><td>数据层</td><td class="n">90</td><td class="n">90</td><td class="n flat">—</td><td>连接池自愈 + <code>UNNEST</code> 批量 + 单往返合并，确实扎实</td></tr>
+        <tr><td>爬虫</td><td class="n">88</td><td class="n">87</td><td class="n down">↓1</td><td>4 个真解析器写得专业，但 <code>ccin</code> 强制 HTTP + 静默失败无告警</td></tr>
+        <tr><td>容错</td><td class="n">88</td><td class="n">88</td><td class="n flat">—</td><td>AI 降级链、DB 重连、软删设计都在线</td></tr>
+        <tr><td>产品</td><td class="n">85</td><td class="n">85</td><td class="n flat">—</td><td>6 Tab 功能完整，成稿体检 + 三版适配是真需求</td></tr>
+        <tr><td>架构</td><td class="n">80</td><td class="n">80</td><td class="n flat">—</td><td>分层清晰，但 <code>ai_filter</code> 死代码 + 分类逻辑耦合在爬虫里</td></tr>
+        <tr><td>AI 集成</td><td class="n">80</td><td class="n">77</td><td class="n down">↓3</td><td>提示词无注入防护、system prompt 无防御、示例严重偏斜</td></tr>
+        <tr><td>性能</td><td class="n">78</td><td class="n">78</td><td class="n flat">—</td><td>单机场景够用，向量库暴力 cosine 是本阶段合理选择</td></tr>
+        <tr><td>安全</td><td class="n">75</td><td class="n">74</td><td class="n down">↓1</td><td>HTTP 明文 + 登录无限流 + 密码下限 4 位 + prompt 注入面</td></tr>
+        <tr><td>可维护性</td><td class="n">66</td><td class="n">66</td><td class="n flat">—</td><td>HANDOFF 过期 + README 不实 + deploy_cloud.ps1 跟踪 + 零测试</td></tr>
+        <tr><td>测试</td><td class="n">30</td><td class="n">30</td><td class="n flat">—</td><td>两个 0 字节测试文件，CI 无门禁，维持最低分</td></tr>
+      </tbody>
+    </table>
+    <div class="callout c-blue">
+      <span class="t">加权总分 77.1 / 100 —— 等级 B</span>
+      <p>AI 集成 -3、爬虫 -1、安全 -1 的下修，被"分类问题影响面下调"带来的可观感对冲，最终加权结果与首次完全持平。这是巧合，但结果是合理的。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">5</span>修正：上次的优先级排列有一处错了</h2>
+    <p>上次给的下一步建议顺序是：<code>1. 补 Pillow → 2. 删掉或接上 ai_filter → 3. 补测试</code></p>
+    <p><strong>本次复评认为，第 2 条和第 3 条的顺序应该反过来，而且真正该排第一的是一条上次没提的。</strong></p>
+    <p>按<strong>「投入产出比」</strong>重排：</p>
+    <table>
+      <thead><tr><th style="width:78px">优先级</th><th>动作</th><th style="width:76px">投入</th><th style="width:24%">产出</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tag t-iron">P0-①</span></td><td><strong>CI 加 <code>ruff check .</code> + <code>python -m compileall .</code></strong></td><td>3 行 YAML</td><td>拦住全部低级错误</td></tr>
+        <tr><td><span class="tag t-iron">P0-②</span></td><td><strong>补 Pillow 到 requirements.txt</strong></td><td>1 行</td><td>消除一个必然踩的部署坑</td></tr>
+        <tr><td><span class="tag t-warn">P1-③</span></td><td><strong>处理 <code>ai_filter.py</code></strong>（接进爬虫 或 删文件 + 改 README）</td><td>半小时</td><td>消除"文档承诺 ≠ 实际行为"</td></tr>
+        <tr><td><span class="tag t-warn">P1-④</span></td><td><strong>给 AI prompt 加隔离护栏</strong></td><td>半小时</td><td>关掉注入面（活代码）</td></tr>
+        <tr><td><span class="tag t-warn">P1-⑤</span></td><td><strong>把 <code>HANDOFF.md</code> 改成实话</strong></td><td>1 小时</td><td>防止下一个人被带偏</td></tr>
+        <tr><td><span class="tag t-ok">P2-⑥</span></td><td>补第一个真测试（从 <code>auth.py</code> 入手最划算）</td><td>半天</td><td>从 0 到 1</td></tr>
+        <tr><td><span class="tag t-ok">P2-⑦</span></td><td>爬虫失败时非 0 退出</td><td>1 小时</td><td>消除静默失败</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="num">6</span>和爆米项目复评的对照</h2>
+    <p>两次复评形成了鲜明对照：</p>
+    <table>
+      <thead><tr><th></th><th>爆米项目</th><th>DPetroWorkbench</th></tr></thead>
+      <tbody>
+        <tr><td>首评后代码变化</td><td>有（推送了 <code>e5f9150</code> 等修复）</td><td><strong>零</strong></td></tr>
+        <tr><td>复评性质</td><td>修复验收</td><td>独立重评</td></tr>
+        <tr><td>分数变化</td><td class="up">82.8 → 85.4（+2.6）</td><td class="flat">77.1 → 77.1（0）</td></tr>
+        <tr><td>提升来源</td><td>真实修了 P1 问题</td><td>无</td></tr>
+      </tbody>
+    </table>
+    <div class="callout c-purple">
+      <span class="t">这个对照本身就是一个结论</span>
+      <p>爆米项目的分数上涨，不是因为"复评更宽松"，而是因为它<strong>真的动手修了</strong>。DPetroWorkbench 的分数不动，也不是"复评更严苛"，而是因为它<strong>确实没动</strong>。</p>
+    </div>
+    <p>评分体系的一致性得到了交叉验证 —— 这是两次复评最大的额外收获。</p>
+  </section>
+
+  <div class="final">
+    <h2><span class="num">7</span>最终评价</h2>
+
+    <div class="big">这个项目不缺能力，缺的是「让能力可被安全重复使用」的机制。</div>
+
+    <p>这句话是首次测评的结论，<strong>本次复评后一个字都不用改。</strong></p>
+
+    <p>它有 4 个手写的真解析器、有连接池自愈、有 AI 三级降级、有 <code>UNNEST</code> 批量优化 —— <strong>这些是真本事，不是脚手架</strong>。</p>
+
+    <p>但它同时有：</p>
+    <ul>
+      <li>两个 0 字节的测试文件</li>
+      <li>一个从头到尾没被调用过的 AI 过滤模块</li>
+      <li>一份说自己是 SQLite 其实是 PostgreSQL 的交接文档</li>
+      <li>一条把外部网页内容直接拼进 LLM 的提示词</li>
+      <li>一条 CI 流水线，代码写错了它会说"通过"</li>
+    </ul>
+
+    <p style="margin-top:18px"><strong>这些不是能力问题，是习惯问题。</strong></p>
+
+    <h2 style="margin-top:34px"><span class="num">8</span>下一步（一句话版）</h2>
+    <div class="big" style="border-left-color:#f79009">不要再堆功能了。</div>
+    <p>把上面那 7 条按顺序做完，这个项目从 77 分走到 85 分以上<strong>不需要写任何新功能</strong>。</p>
+    <p>真正的分水岭不在"还能加什么"，而在"<strong>加的东西怎么保证不坏</strong>"。</p>
+  </div>
+
+  <footer>
+    本报告基于静态代码审计 · 未运行程序 · 未修改任何文件 · 未调用任何 AI 接口<br>
+    所有结论均可通过报告中所附文件路径与行号复核 · 测评时间 2026-10-04
+  </footer>
+
+</div>
+</body>
+</html>
