@@ -42,6 +42,19 @@ import crawler
 st.set_page_config(page_title="行者", layout="wide")
 
 
+def _bj_time(iso_str: str | None) -> str:
+    """把库里存的 UTC 时间转成北京时间显示（使用者在中国，看 UTC 会误判成"没保存"）。
+
+    定义在文件最前面：多个标签页都要用，而 Streamlit 是从上到下顺序执行的。
+    """
+    if not iso_str:
+        return ""
+    try:
+        return (datetime.fromisoformat(iso_str) + timedelta(hours=8)).strftime("%m-%d %H:%M:%S")
+    except Exception:  # noqa: BLE001
+        return str(iso_str)[:19].replace("T", " ")
+
+
 def _md_escape(s: str) -> str:
     """转义 markdown 特殊字符，防止第三方内容（标题/URL）注入。"""
     if not s:
@@ -244,19 +257,52 @@ def _is_image_bytes(data: bytes) -> bool:
     return False
 
 
+def _archived_data_uri(url: str) -> str:
+    """从数据库归档里取图（抓取当时就压缩存下来的），取不到返回空串。
+
+    这是「中国石油报图片全失效」的根治办法：图已经在自己库里，
+    报社网站改版、把原图下架，这边照旧能显示。
+    """
+    if not getattr(config, "IMAGE_ARCHIVE_ENABLED", True):
+        return ""
+    try:
+        row = db.get_image_asset(url)
+    except Exception:
+        return ""     # 归档表还没建/查不动，静默回落到源站下载
+    if not row or not row.get("data"):
+        return ""
+    try:
+        raw = row["data"]
+        if isinstance(raw, memoryview):
+            raw = raw.tobytes()
+        b64 = base64.b64encode(bytes(raw)).decode()
+        return f"data:{row.get('mime') or 'image/jpeg'};base64,{b64}"
+    except Exception:
+        return ""
+
+
 def _img_to_data_uri(url: str) -> str:
     """服务端下载图片转 base64 data URI。
 
     绕过 https 页面加载 http 图片的浏览器混合内容拦截，
     同时处理中国石油报需 Referer、中国化工报证书异常等情况。
     带内存缓存，避免重复下载。
+
+    取图顺序：内存缓存 → 数据库归档 → 磁盘缓存 → 源站下载。
+    归档要排在磁盘缓存前面：磁盘里可能存着"以前下载失败"的空标记，
+    而现在库里有归档图，应该优先用归档的。
     """
     if not url:
         return ""
     # 1. 内存缓存（最快）
     if url in _IMG_CACHE:
         return _IMG_CACHE[url]
-    # 2. 磁盘缓存（重启后仍有效，避免重复下载）
+    # 2. 数据库归档（源站删图也不受影响）
+    _archived = _archived_data_uri(url)
+    if _archived:
+        _IMG_CACHE[url] = _archived
+        return _archived
+    # 3. 磁盘缓存（重启后仍有效，避免重复下载）
     disk_val = _load_disk_cache(url)
     if disk_val is not None:
         # None=缓存不存在；""=之前下载失败过；非空=成功缓存
@@ -359,6 +405,12 @@ def _preload_images(urls: list[str], max_workers: int = 8) -> None:
         nu = _normalize_display_url(u)
         if nu in _IMG_CACHE:
             continue
+        # 优先查库内归档：中国石油报原图已被源站下架，磁盘里只有"失败标记"，
+        # 若直接加载失败标记，归档图就永远没机会出场了
+        _archived = _archived_data_uri(nu)
+        if _archived:
+            _IMG_CACHE[nu] = _archived
+            continue
         if _load_disk_cache(nu) is not None:
             # 磁盘有缓存（含失败标记），加载到内存即可
             _IMG_CACHE[nu] = _load_disk_cache(nu) or ""
@@ -434,12 +486,19 @@ def _fetch_image_articles_cached(limit=200):
     return db.fetch_image_articles(limit)
 
 
+# 已排除列表：爬虫写、页面读，一天才变一次，同样走缓存 + 写后失效
+@st.cache_data(ttl=60)
+def _list_excluded_cached(limit: int = 60, _v: int = 0):
+    return [dict(r) for r in db.list_excluded(limit=limit)]
+
+
 def _invalidate_caches():
     """审核/删除/投稿等写操作后调用，清空所有数据缓存，确保列表立即刷新。"""
     _stats_overview_cached.clear()
     _fetch_unreviewed_cached.clear()
     _fetch_reviewed_cached.clear()
     _fetch_image_articles_cached.clear()
+    _list_excluded_cached.clear()
 
 
 def _invalidate_draft_cache():
@@ -750,8 +809,8 @@ _UPLOAD_PAGE_SIZE = 12  # 每页展示数量
 
 
 # ---------------- Tabs ----------------
-tab_review, tab_history, tab_calendar, tab_material, tab_writing, tab_help = st.tabs(
-    ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "📚 素材对标", "✍️ 撰稿中心", "❓ 使用说明"]
+tab_review, tab_history, tab_excluded, tab_calendar, tab_material, tab_writing, tab_help = st.tabs(
+    ["✅ 今日审核", "🗂 历史已审", "🚫 已排除", "📅 常规日历", "📚 素材对标", "✍️ 撰稿中心", "❓ 使用说明"]
 )
 
 
@@ -1011,7 +1070,100 @@ with tab_history:
                         st.rerun()
 
 
-# ----- Tab 3: 常规日历 + 投稿记录 -----
+# ----- Tab 3: 已排除（过滤留痕，可恢复） -----
+with tab_excluded:
+    st.subheader("已排除稿件")
+    st.caption(
+        "抓取时被规则拦下的稿件都记在这里，每一条都写明「为什么被拦」。"
+        "规则要是误杀了，点「↩️ 恢复」它就回到「今日审核」重新走流程。"
+    )
+    _EX_LABEL = {
+        "topic_blacklist": "🚫 题材黑名单",
+        "not_photo_news": "📄 不是图片新闻",
+        "not_in_5cats": "🧭 不在 5 类题材",
+        "comic": "🎨 疑似漫画/插画",
+        "ai_failed": "🤖 AI 判定失败",
+    }
+    try:
+        ex_rows = _list_excluded_cached(60)
+        ex_stats = db.excluded_stats()
+    except Exception as e:
+        st.error(f"读取已排除列表失败：{e}")
+        ex_rows, ex_stats = [], {}
+    if not ex_rows:
+        st.info("暂无被排除的稿件。下一次抓取后，被规则拦下的稿件会出现在这里。")
+    else:
+        if ex_stats:
+            st.caption(
+                "原因分布："
+                + " ｜ ".join(f"{_EX_LABEL.get(k, k)} {v} 条" for k, v in ex_stats.items())
+            )
+        codes = sorted({r["reason_code"] for r in ex_rows})
+        pick = st.selectbox(
+            "按原因筛选", ["全部"] + [_EX_LABEL.get(c, c) for c in codes],
+            key="ex_filter",
+        )
+        if pick != "全部":
+            _want = next(c for c in codes if _EX_LABEL.get(c, c) == pick)
+            ex_rows = [r for r in ex_rows if r["reason_code"] == _want]
+        show_img = st.checkbox("显示图片（加载会慢一些）", key="ex_show_img")
+        for r in ex_rows[:60]:
+            label = _EX_LABEL.get(r["reason_code"], r["reason_code"])
+            with st.expander(f"{label} | {r['title']} | {r['source_name']}/{r['column_name']}"):
+                st.caption(f"排除原因：{r['reason'] or '（未记录）'}")
+                st.caption(f"抓取时间：{_bj_time(r.get('crawled_at'))}")
+                if r.get("body_snippet"):
+                    st.markdown(_md_escape(r["body_snippet"][:300]))
+                if show_img and r.get("image_urls"):
+                    try:
+                        _us = json.loads(r["image_urls"])
+                        for u in _us[:2]:
+                            _render_image(u)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("↩️ 恢复入库", key=f"ex_restore_{r['id']}", width="stretch"):
+                        try:
+                            new_id = db.restore_excluded(r["id"])
+                            if new_id:
+                                _invalidate_caches()
+                                st.toast("已恢复到「今日审核」", icon="↩️")
+                            else:
+                                st.warning(
+                                    "恢复失败：栏目「"
+                                    f"{r['source_name']}/{r['column_name']}"
+                                    "」在库里找不到了（config 改过栏目名？），"
+                                    "或者这篇已经入库过。"
+                                )
+                        except Exception as e:
+                            st.error(f"恢复失败：{e}")
+                        st.rerun()
+                with b2:
+                    if st.button("🗑 删除记录", key=f"ex_del_{r['id']}", width="stretch"):
+                        st.session_state["_pending_ex_del"] = r["id"]
+                        st.rerun()
+            if st.session_state.get("_pending_ex_del") == r["id"]:
+                st.warning(f"⚠️ 确认删除「{r['title'][:30]}…」的排除记录？删除后不再可恢复。")
+                ec = st.columns([1, 1, 8])
+                with ec[0]:
+                    if st.button("✅ 确认删", key=f"ex_cfm_{r['id']}",
+                                 type="primary", width="stretch"):
+                        try:
+                            db.delete_excluded(r["id"])
+                            _list_excluded_cached.clear()
+                            st.toast("已删除该排除记录", icon="🗑")
+                        except Exception as e:
+                            st.error(f"删除失败：{e}")
+                        st.session_state.pop("_pending_ex_del", None)
+                        st.rerun()
+                with ec[1]:
+                    if st.button("取消", key=f"ex_cancel_{r['id']}", width="stretch"):
+                        st.session_state.pop("_pending_ex_del", None)
+                        st.rerun()
+
+
+# ----- Tab 4: 常规日历 + 投稿记录 -----
 with tab_calendar:
     st.subheader("未来两周常规选题预警")
     try:
@@ -1321,16 +1473,6 @@ def _set_draft_content(title: str, body: str) -> None:
     st.session_state["draft_body"] = body
     st.session_state["draft_title_in"] = title
     st.session_state["draft_body_in"] = body
-
-
-def _bj_time(iso_str: str | None) -> str:
-    """把库里存的 UTC 时间转成北京时间显示（使用者在中国，看 UTC 会误判成"没保存"）。"""
-    if not iso_str:
-        return ""
-    try:
-        return (datetime.fromisoformat(iso_str) + timedelta(hours=8)).strftime("%m-%d %H:%M:%S")
-    except Exception:  # noqa: BLE001
-        return str(iso_str)[:19].replace("T", " ")
 
 
 def _draft_save_status(dirty: bool) -> str:

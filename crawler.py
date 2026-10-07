@@ -34,6 +34,8 @@ from bs4 import BeautifulSoup
 import ai_filter
 import config
 import db
+import image_archive
+import image_guard
 
 
 @dataclass
@@ -249,21 +251,61 @@ def extract_caption_or_short(soup, body_text: str) -> str:
 _ai_stats = {"called": 0, "accepted": 0, "rejected": 0, "failed": 0}
 
 
+def match_topic_blacklist(title: str, body_text: str = "") -> tuple[str, str] | None:
+    """题材黑名单匹配：命中返回 (题材组, 命中词)，未命中返回 None。
+
+    黑名单优先级高于一切（包括栏目直通）：人民日报「视觉」这类图片版题材混杂，
+    整版直通会把旅游/体育/娱乐/漫画照片也当工业图片新闻存进来，必须先拦一道。
+    只扫标题 + 正文前 200 字（图注级短文），控制误伤范围。
+
+    豁免规则：命中黑名单但标题里同时有明显的工业/能源/安全词（供电、油田、检修…），
+    说明黑名单词只是背景板，稿件本身是要的题材 → 不排除。
+    实测案例：「国网本溪供电公司保障旅游景区稳定供电」命中"旅游"，但它是电力保供稿。
+    """
+    blob = f"{title} {(body_text or '')[:200]}"
+    hit = None
+    for group, kws in getattr(config, "TOPIC_BLACKLIST_GROUPS", {}).items():
+        for kw in kws:
+            if kw in blob:
+                hit = (group, kw)
+                break
+        if hit:
+            break
+    if not hit:
+        return None
+    for kw in getattr(config, "TOPIC_WHITELIST_OVERRIDE", ()):
+        if kw in blob:
+            return None
+    return hit
+
+
 def classify_article(src_name: str, col_name: str, title: str, body_text: str = "") -> str | None:
     """判定文章是否属于 5 类之一。返回类别名或 None（不属于则丢弃）。
 
+    前置拦截：题材黑名单（命中返回特殊标记 "_BLACKLIST_"）
     主路径：CATEGORY_MAP 按「源/栏目」精确匹配（零 API 成本）
-    兜底1：标题关键词匹配
-    兜底2：AI 语义过滤（ai_filter.is_relevant），仅在前两者都未命中时调用
+            —— 但 PHOTO_COLUMN_KEYWORDS 里登记的「题材混杂图片版」不走直通
+    兜底1：图片版专属标题关键词（PHOTO_COLUMN_KEYWORDS）
+    兜底2：通用标题关键词（CATEGORY_KEYWORDS）
+    兜底3：AI 语义过滤（ai_filter.is_relevant），仅在前两者都未命中时调用
     AI 失败时返回特殊标记 "_AI_FAILED_"，调用方应跳过但不计入"无关丢弃"
     """
     sc = f"{src_name}/{col_name}"
-    # 主路径
-    for cat, sc_set in config.CATEGORY_MAP.items():
-        if sc in sc_set:
-            return cat
-    # 兜底1：标题关键词
+    # 前置拦截：题材黑名单（旅游/体育/娱乐/漫画/生活休闲）
+    if match_topic_blacklist(title, body_text):
+        return "_BLACKLIST_"
     blob = f"{title} {body_text[:100]}"
+    # 主路径：栏目直通（题材混杂的图片版除外）
+    if sc not in getattr(config, "PHOTO_COLUMN_KEYWORDS", {}):
+        for cat, sc_set in config.CATEGORY_MAP.items():
+            if sc in sc_set:
+                return cat
+    # 兜底1：图片版专属关键词（如人民日报/视觉：工厂、装置、钻井、机器人…）
+    for cat, kws in getattr(config, "PHOTO_COLUMN_KEYWORDS", {}).get(sc, {}).items():
+        for kw in kws:
+            if kw in blob:
+                return cat
+    # 兜底2：通用标题关键词
     for cat, kws in config.CATEGORY_KEYWORDS.items():
         for kw in kws:
             if kw in blob:
@@ -405,6 +447,16 @@ def _is_photo_news(soup, body_text: str, image_count: int,
         (b) 图片数 >= 2（组照）
         (c) 正文 <= 500 字（短图文）
     """
+    ok, _why = _photo_news_check(soup, body_text, image_count, title=title, url=url)
+    return ok
+
+
+def _photo_news_check(soup, body_text: str, image_count: int,
+                      title: str = "", url: str = "") -> tuple[bool, str]:
+    """同 _is_photo_news，但额外返回「为什么不算图片新闻」的人话说明。
+
+    说明写进「已排除」列表，供使用者复核规则是不是误杀。
+    """
     body = (body_text or "").strip()
     body_len = len(body)
     title_clean = (title or "").strip()
@@ -412,21 +464,22 @@ def _is_photo_news(soup, body_text: str, image_count: int,
     # ---------- 第一层：是新闻吗？ ----------
     # 标题长度不合理
     if len(title_clean) < 4 or len(title_clean) > 60:
-        return False
+        return False, f"标题长度不合常规（{len(title_clean)} 字，应为 4~60 字）"
     # 非新闻标题关键词
     _non_news_kws = ("公告", "声明", "通知", "广告", "招聘", "启事", "寻人", "寻物",
                      "致歉", "更正", "鸣谢", "讣告", "婚讯", "寿辰",
                      "本版责编", "本版编辑", "责编：", "责任编辑", "版式策划",
                      "图片编辑", "美术编辑", "校检", "审读")
-    if any(kw in title_clean for kw in _non_news_kws):
-        return False
+    for kw in _non_news_kws:
+        if kw in title_clean:
+            return False, f"不是新闻（标题含「{kw}」，属公告/启事类）"
     # 正文过短（不是新闻）
     if body_len < 50:
-        return False
+        return False, f"正文只有 {body_len} 字，太短，不像一条新闻"
 
     # ---------- 第二层：是图片新闻吗？ ----------
     if image_count < 1:
-        return False
+        return False, "纯文字稿，没有配图"
     # (a) 有图注
     has_caption = False
     for sel in ("figcaption", "p[class*=caption]", "p[class*=pic]",
@@ -447,14 +500,117 @@ def _is_photo_news(soup, body_text: str, image_count: int,
             if has_caption:
                 break
     if has_caption:
-        return True
+        return True, "有配图且有图注"
     # (b) 多图组照
     if image_count >= 2:
-        return True
+        return True, f"组照（{image_count} 张图）"
     # (c) 短正文
     if body_len <= 500:
-        return True
-    return False
+        return True, f"单图 + 短图文（正文 {body_len} 字）"
+    return False, f"有 {image_count} 张图，但无图注且正文过长（{body_len} 字 > 500 字），更像长篇报道不是图片新闻"
+
+
+# ---------------- 过滤留痕：被排除的稿件登记造册 ----------------
+# 以前不合规的稿件是静默丢弃的：你看不见系统替你扔了什么，也找不回来。
+# 现在每一条被排除的稿件都写进 excluded_article 表，带人话原因，
+# 在「🚫 已排除」页面可查看、可一键恢复入库。规则误杀不会再变成永久丢稿。
+
+def _record_excluded(*, source: str, column: str, title: str, url: str,
+                     reason_code: str, reason: str, image_urls=None,
+                     body_text: str = "", publish_date=None,
+                     image_count: int = 1) -> None:
+    """登记一条被排除的稿件。纯文字稿默认不登记（太多了，会把列表淹掉）。
+
+    reason_code: not_photo_news / topic_blacklist / not_in_5cats / comic
+    """
+    if not getattr(config, "EXCLUSION_LOG_ENABLED", True):
+        return
+    if image_count < 1 and not getattr(config, "EXCLUSION_LOG_INCLUDE_NO_IMAGE", False):
+        return  # 纯文字稿：本工具只要图片新闻，没必要占列表位置
+    if not url or not title:
+        return
+    try:
+        if image_urls and not isinstance(image_urls, str):
+            image_urls = json.dumps(list(image_urls), ensure_ascii=False)
+        db.save_excluded(
+            url=url, title=title, source_name=source, column_name=column,
+            reason_code=reason_code, reason=reason, publish_date=publish_date,
+            body_snippet=(body_text or "")[:300], image_urls=image_urls,
+        )
+    except Exception as e:
+        # 登记失败绝不能影响抓取主流程
+        config.logger.debug(f"登记已排除稿件失败（忽略）：{e}")
+
+
+def gate_article(*, source: str, column: str, title: str, url: str,
+                 body_text: str, image_count: int, soup,
+                 image_urls=None, publish_date=None,
+                 stats: dict, comic_check=None) -> tuple[str | None, bool]:
+    """三道闸门：①是不是图片新闻 ②属不属于 5 类题材 ③是不是漫画。
+
+    返回 (category, ai_pending)。category 为 None 表示被排除
+    （已自动登记到已排除列表，并把计数写进 stats）。
+    四个 crawl_* 函数共用这一份，避免四处各写一遍导致规则漂移。
+
+    comic_check：可选函数，参数是 image_urls（JSON 串），返回 (是否漫画, 依据)。
+    只有 config.COMIC_CHECK_SOURCES 里的来源才传（如辽宁日报）。
+    """
+    ok, why = _photo_news_check(soup, body_text, image_count, title=title, url=url)
+    if not ok:
+        stats["skipped_no_image"] = stats.get("skipped_no_image", 0) + 1
+        _record_excluded(source=source, column=column, title=title, url=url,
+                         reason_code="not_photo_news", reason=why,
+                         image_urls=image_urls, body_text=body_text,
+                         publish_date=publish_date, image_count=image_count)
+        return None, False
+
+    cat = classify_article(source, column, title, body_text)
+    ai_pending = False
+    if cat == "_AI_FAILED_":
+        # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
+        ai_pending = True
+        stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
+        return "综合", ai_pending
+    if cat == "_BLACKLIST_":
+        stats["skipped_category"] = stats.get("skipped_category", 0) + 1
+        hit = match_topic_blacklist(title, body_text) or ("其他", "")
+        _record_excluded(
+            source=source, column=column, title=title, url=url,
+            reason_code="topic_blacklist",
+            reason=f"题材黑名单：{hit[0]}题材（标题/图注命中「{hit[1]}」）",
+            image_urls=image_urls, body_text=body_text,
+            publish_date=publish_date, image_count=image_count,
+        )
+        return None, False
+    if not cat:
+        stats["skipped_category"] = stats.get("skipped_category", 0) + 1
+        _record_excluded(
+            source=source, column=column, title=title, url=url,
+            reason_code="not_in_5cats",
+            reason="不属于 5 类题材（炼油化工新材料/工业生产/科技创新/人工智能/安全生产）",
+            image_urls=image_urls, body_text=body_text,
+            publish_date=publish_date, image_count=image_count,
+        )
+        return None, False
+
+    # 第三道闸门：漫画/插画识别（只对白名单来源，且要看图才知道）
+    if comic_check is not None and source in getattr(config, "COMIC_CHECK_SOURCES", set()):
+        try:
+            is_comic, why = comic_check(image_urls)
+        except Exception:
+            is_comic, why = False, ""
+        if is_comic:
+            stats["skipped_comic"] = stats.get("skipped_comic", 0) + 1
+            _record_excluded(
+                source=source, column=column, title=title, url=url,
+                reason_code="comic",
+                reason=f"疑似漫画/插画：{why}",
+                image_urls=image_urls, body_text=body_text,
+                publish_date=publish_date, image_count=image_count,
+            )
+            return None, False
+
+    return cat, ai_pending
 
 
 def extract_article(html: str, base_url: str = "") -> ArticleContent | None:
@@ -664,20 +820,14 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                     pass
             has_image = bool(img_urls)
             image_urls = json.dumps(img_urls, ensure_ascii=False) if img_urls else None
-            # 【新规则1】两层判定：先确认是新闻，再确认是图片新闻
-            if not _is_photo_news(BeautifulSoup(body_html, "html.parser"), body_text,
-                                  len(img_urls), title=title, url=art_url):
-                stats["skipped_no_image"] = stats.get("skipped_no_image", 0) + 1
-                continue
-            # 【新规则2】只保留 5 类
-            cat = classify_article(src["name"], col_name, title, body_text)
-            ai_pending = False
-            if cat == "_AI_FAILED_":
-                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
-                ai_pending = True
-                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-            elif not cat:
-                stats["skipped_category"] = stats.get("skipped_category", 0) + 1
+            # 两道闸门：①是不是图片新闻 ②属不属于 5 类（被排除的自动登记留痕）
+            cat, ai_pending = gate_article(
+                source=src["name"], column=col_name, title=title, url=art_url,
+                body_text=body_text, image_count=len(img_urls),
+                soup=BeautifulSoup(body_html, "html.parser"),
+                image_urls=image_urls, publish_date=publish_date, stats=stats,
+            )
+            if not cat:
                 continue
             # 【新规则3】只存图注/短说明，弃长正文
             short_text = extract_caption_or_short(BeautifulSoup(body_html, "html.parser"), body_text)
@@ -691,6 +841,18 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                 config.logger.info(f"  + [{cat}] {title}")
             else:
                 stats["skipped"] += 1
+            # 图片归档：白名单来源（中国石油报）在抓取当时就下载+压缩+存库，
+            # 免得源站改版把原图下架后，页面上一片"图片已失效"。
+            # 原图 404 时用「版面整版图 + 文章坐标」裁出文章区域兜底。
+            if image_archive.should_archive(src["name"]):
+                _board_url = urljoin(base_for_img, img_prefix + (page.get("img_url") or ""))
+
+                def _crop_from_board(_u=_board_url, _c=(a.get("coord") or "")):
+                    return image_archive.crop_board_region(_u, _c)
+
+                stats["archived"] = stats.get("archived", 0) + \
+                    image_archive.archive_urls(img_urls, src["name"],
+                                               fallback_fn=_crop_from_board)
         time.sleep(config.CRAWL_INTERVAL_SECONDS)
     if not matched_any and all_aliases:
         config.logger.info(f"  [提示] 当期没有版面 alias 命中 config 栏目名。考虑在 config.py 加这些版面之一。")
@@ -850,19 +1012,30 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
             # 【新规则1】严格图片新闻判定：≥1 张图 且(有图注 OR 正文 ≤500 字)
             _lnd_soup = BeautifulSoup(detail, "html.parser")
             _lnd_img_count = len(json.loads(art.image_urls)) if art.image_urls else 0
-            if not _is_photo_news(_lnd_soup, art.body_text, _lnd_img_count,
-                                  title=art.title, url=link.url):
-                stats["skipped_no_image"] = stats.get("skipped_no_image", 0) + 1
-                continue
-            # 【新规则2】只保留 5 类
-            cat = classify_article(src["name"], col["name"], art.title, art.body_text)
-            ai_pending = False
-            if cat == "_AI_FAILED_":
-                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
-                ai_pending = True
-                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-            elif not cat:
-                stats["skipped_category"] = stats.get("skipped_category", 0) + 1
+            # 两道闸门：①是不是图片新闻 ②属不属于 5 类（被排除的自动登记留痕）
+            def _lnd_comic_check(img_json=art.image_urls):
+                """下载首图做像素级判别：是新闻照片还是手绘漫画。"""
+                try:
+                    us = json.loads(img_json) if img_json else []
+                except (json.JSONDecodeError, TypeError):
+                    us = []
+                for u in us[:2]:
+                    try:
+                        raw = image_archive._download(u, timeout=15)
+                    except Exception:
+                        continue
+                    ok, why = image_guard.looks_like_comic(raw)
+                    if ok:
+                        return True, why
+                return False, ""
+
+            cat, ai_pending = gate_article(
+                source=src["name"], column=col["name"], title=art.title, url=link.url,
+                body_text=art.body_text, image_count=_lnd_img_count, soup=_lnd_soup,
+                image_urls=art.image_urls, publish_date=art.publish_date, stats=stats,
+                comic_check=_lnd_comic_check,
+            )
+            if not cat:
                 continue
             # 【新规则3】只存图注/短说明，弃长正文
             short_text = extract_caption_or_short(_lnd_soup, art.body_text)
@@ -877,6 +1050,9 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
                 config.logger.info(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
+            if image_archive.should_archive(src["name"]):
+                stats["archived"] = stats.get("archived", 0) + \
+                    image_archive.archive_urls(art.image_urls, src["name"])
     return stats
 
 
@@ -935,19 +1111,13 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
             # 【新规则1】严格图片新闻判定
             _gen_soup = BeautifulSoup(detail, "html.parser")
             _gen_img_count = len(json.loads(art.image_urls)) if art.image_urls else 0
-            if not _is_photo_news(_gen_soup, art.body_text, _gen_img_count,
-                                  title=art.title, url=link.url):
-                stats["skipped_no_image"] += 1
-                continue
-            # 【新规则2】只保留 5 类
-            cat = classify_article(src["name"], col["name"], art.title, art.body_text)
-            ai_pending = False
-            if cat == "_AI_FAILED_":
-                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
-                ai_pending = True
-                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-            elif not cat:
-                stats["skipped_category"] += 1
+            # 两道闸门：①是不是图片新闻 ②属不属于 5 类（被排除的自动登记留痕）
+            cat, ai_pending = gate_article(
+                source=src["name"], column=col["name"], title=art.title, url=link.url,
+                body_text=art.body_text, image_count=_gen_img_count, soup=_gen_soup,
+                image_urls=art.image_urls, publish_date=art.publish_date, stats=stats,
+            )
+            if not cat:
                 continue
             # 【新规则3】只存图注/短说明，弃长正文
             short_text = extract_caption_or_short(_gen_soup, art.body_text)
@@ -962,6 +1132,9 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
                 config.logger.info(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
+            if image_archive.should_archive(src["name"]):
+                stats["archived"] = stats.get("archived", 0) + \
+                    image_archive.archive_urls(art.image_urls, src["name"])
     return stats
 
 
@@ -1117,19 +1290,13 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
             # 【新规则1】严格图片新闻判定：≥1 张图 且(有图注 OR 正文 ≤500 字)
             _rmrb_soup = BeautifulSoup(detail, "html.parser")
             _rmrb_img_count = len(json.loads(art.image_urls)) if art.image_urls else 0
-            if not _is_photo_news(_rmrb_soup, art.body_text, _rmrb_img_count,
-                                  title=art.title, url=link.url):
-                stats["skipped_no_image"] += 1
-                continue
-            # 【新规则2】只保留 5 类
-            cat = classify_article(src["name"], col["name"], art.title, art.body_text)
-            ai_pending = False
-            if cat == "_AI_FAILED_":
-                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
-                ai_pending = True
-                stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-            elif not cat:
-                stats["skipped_category"] += 1
+            # 两道闸门：①是不是图片新闻 ②属不属于 5 类（被排除的自动登记留痕）
+            cat, ai_pending = gate_article(
+                source=src["name"], column=col["name"], title=art.title, url=link.url,
+                body_text=art.body_text, image_count=_rmrb_img_count, soup=_rmrb_soup,
+                image_urls=art.image_urls, publish_date=art.publish_date, stats=stats,
+            )
+            if not cat:
                 continue
             # 【新规则3】只存图注/短说明
             short_text = extract_caption_or_short(_rmrb_soup, art.body_text)
@@ -1144,6 +1311,9 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
                 config.logger.info(f"  + [{cat}] {art.title}")
             else:
                 stats["skipped"] += 1
+            if image_archive.should_archive(src["name"]):
+                stats["archived"] = stats.get("archived", 0) + \
+                    image_archive.archive_urls(art.image_urls, src["name"])
     return stats
 
 

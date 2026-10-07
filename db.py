@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
+import hashlib
+import json
 
 import psycopg2
 import psycopg2.extras
@@ -136,6 +138,43 @@ CREATE TABLE IF NOT EXISTS draft (
     updated_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_draft_updated_at ON draft(updated_at DESC);
+
+-- 已排除稿件（2026-10-07 新增）
+-- 背景：以前抓到的稿件不合规就静默丢弃，你看不见"系统替你扔了什么"，
+-- 也找不回来。现在被过滤的稿件全部登记在此，带排除原因，可人工恢复入库。
+-- url 唯一：同一篇反复被抓到只记一条，不刷屏。
+CREATE TABLE IF NOT EXISTS excluded_article (
+    id            BIGSERIAL PRIMARY KEY,
+    url           TEXT NOT NULL UNIQUE,
+    title         TEXT,
+    source_name   TEXT,
+    column_name   TEXT,
+    reason_code   TEXT NOT NULL,   -- topic_blacklist / not_photo_news / not_in_5cats / ai_failed / comic
+    reason        TEXT,            -- 人话说明（含命中词），直接展示给使用者看
+    publish_date  TEXT,
+    body_snippet  TEXT,
+    image_urls    TEXT,
+    crawled_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_excluded_crawled ON excluded_article(crawled_at DESC);
+
+-- 图片归档（2026-10-07 新增）
+-- 背景：中国石油报改版后源站把历史原图全下架了，旧链接全废、图再也找不回来。
+-- 对策：抓取当时就把图下下来、压缩后存这里，页面优先读归档，源站删图不受影响。
+-- 只存 config.IMAGE_ARCHIVE_SOURCES 白名单里的来源，控制体积（压缩后约 38KB/张）。
+CREATE TABLE IF NOT EXISTS image_asset (
+    id            BIGSERIAL PRIMARY KEY,
+    orig_url      TEXT NOT NULL UNIQUE,
+    source_name   TEXT,
+    mime          TEXT NOT NULL,
+    data          BYTEA NOT NULL,
+    width         INTEGER,
+    height        INTEGER,
+    orig_bytes    INTEGER,   -- 压缩前大小
+    stored_bytes  INTEGER,   -- 压缩后大小
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_image_asset_source ON image_asset(source_name);
 
 -- P3 语义向量索引表（替代旧的 data/article_vectors.npz 落盘文件）
 -- embedding 存 JSONB（向量列表），不引入 pgvector 扩展以省事
@@ -613,3 +652,181 @@ def delete_draft(draft_id: int) -> bool:
         cur = conn_cursor(c)
         cur.execute("DELETE FROM draft WHERE id=%s", (draft_id,))
         return cur.rowcount > 0
+
+
+# ---------------- 已排除稿件（excluded_article 表） ----------------
+# 目的：过滤不再"静默丢弃"。被排除的稿件登记造册、写清原因，
+# 使用者随时能看、能恢复，规则误杀时不会永久丢稿。
+
+def save_excluded(*, url: str, title: str = "", source_name: str = "",
+                  column_name: str = "", reason_code: str = "", reason: str = "",
+                  publish_date: str | None = None, body_snippet: str = "",
+                  image_urls: str | None = None) -> bool:
+    """登记一条被排除的稿件。URL 重复则忽略（避免每次抓取重复刷屏）。
+
+    reason_code 取值：topic_blacklist / not_photo_news / not_in_5cats / ai_failed / comic
+    """
+    if not url:
+        return False
+    try:
+        with get_conn() as c:
+            cur = conn_cursor(c)
+            cur.execute(
+                "INSERT INTO excluded_article"
+                "(url, title, source_name, column_name, reason_code, reason,"
+                " publish_date, body_snippet, image_urls, crawled_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (url) DO UPDATE SET "
+                "title=EXCLUDED.title, reason_code=EXCLUDED.reason_code, "
+                "reason=EXCLUDED.reason, crawled_at=EXCLUDED.crawled_at",
+                (url, title[:500], source_name, column_name, reason_code, reason,
+                 publish_date, (body_snippet or "")[:500], image_urls, now_iso()),
+            )
+            return cur.rowcount > 0
+    except Exception as e:
+        config.logger.warning(f"登记已排除稿件失败：{e}")
+        return False
+
+
+def list_excluded(limit: int = 100, reason_code: str | None = None) -> list:
+    """已排除稿件列表，最近抓取的在前。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        if reason_code:
+            cur.execute(
+                "SELECT id, url, title, source_name, column_name, reason_code,"
+                " reason, publish_date, body_snippet, image_urls, crawled_at "
+                "FROM excluded_article WHERE reason_code=%s "
+                "ORDER BY crawled_at DESC LIMIT %s", (reason_code, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT id, url, title, source_name, column_name, reason_code,"
+                " reason, publish_date, body_snippet, image_urls, crawled_at "
+                "FROM excluded_article ORDER BY crawled_at DESC LIMIT %s", (limit,),
+            )
+        return cur.fetchall()
+
+
+def excluded_stats() -> dict:
+    """按原因统计已排除条数（一次往返）。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT reason_code, COUNT(*) AS n FROM excluded_article GROUP BY reason_code"
+        )
+        return {r["reason_code"]: r["n"] for r in cur.fetchall()}
+
+
+def get_excluded(ex_id: int):
+    """读取单条已排除记录。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute("SELECT * FROM excluded_article WHERE id=%s", (ex_id,))
+        return cur.fetchone()
+
+
+def delete_excluded(ex_id: int) -> bool:
+    """彻底删除一条已排除记录（确认不要了）。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute("DELETE FROM excluded_article WHERE id=%s", (ex_id,))
+        return cur.rowcount > 0
+
+
+def restore_excluded(ex_id: int) -> int | None:
+    """把已排除的稿件恢复成待审稿件，返回新 article id；失败返回 None。
+
+    恢复后它会出现在「今日审核」里，正常走人工审核流程。
+    若来源栏目在库里已不存在（config 改过栏目名），返回 None。
+    """
+    row = get_excluded(ex_id)
+    if not row:
+        return None
+    col_id = get_column_id(row["source_name"] or "", row["column_name"] or "")
+    if col_id is None:
+        return None
+    body = row["body_snippet"] or ""
+    img_urls = row["image_urls"]
+    has_image = False
+    if img_urls:
+        try:
+            has_image = len(json.loads(img_urls)) > 0
+        except (json.JSONDecodeError, TypeError):
+            has_image = bool(img_urls)
+    try:
+        with get_conn() as c:
+            cur = conn_cursor(c)
+            cur.execute(
+                "INSERT INTO article"
+                "(column_id, title, url, author, publish_date, summary, body_text,"
+                " content_hash, crawled_at, has_image, image_urls, ai_pending) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) "
+                "ON CONFLICT (url) DO NOTHING RETURNING id",
+                (col_id, row["title"] or "(无标题)", row["url"], None,
+                 row["publish_date"], body[:80], body,
+                 hashlib.md5((row["url"] or "").encode("utf-8")).hexdigest(),
+                 now_iso(), has_image, img_urls),
+            )
+            new = cur.fetchone()
+            if not new:
+                return None
+            cur.execute("DELETE FROM excluded_article WHERE id=%s", (ex_id,))
+            return int(new["id"])
+    except Exception as e:
+        config.logger.warning(f"恢复已排除稿件失败：{e}")
+        return None
+
+
+# ---------------- 图片归档（image_asset 表） ----------------
+
+def save_image_asset(*, orig_url: str, source_name: str, mime: str, data: bytes,
+                     width: int = 0, height: int = 0,
+                     orig_bytes: int = 0) -> bool:
+    """存一张压缩后的归档图片。同 URL 已存在则跳过（不重复占空间）。"""
+    if not orig_url or not data:
+        return False
+    try:
+        with get_conn() as c:
+            cur = conn_cursor(c)
+            cur.execute(
+                "INSERT INTO image_asset"
+                "(orig_url, source_name, mime, data, width, height,"
+                " orig_bytes, stored_bytes, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (orig_url) DO NOTHING",
+                (orig_url, source_name, mime, psycopg2.Binary(data),
+                 width, height, orig_bytes, len(data), now_iso()),
+            )
+            return cur.rowcount > 0
+    except Exception as e:
+        config.logger.warning(f"归档图片失败：{e}")
+        return False
+
+
+def get_image_asset(orig_url: str):
+    """读取归档图片（返回 row 或 None）。row['data'] 是 bytes。"""
+    if not orig_url:
+        return None
+    try:
+        with get_conn() as c:
+            cur = conn_cursor(c)
+            cur.execute(
+                "SELECT mime, data FROM image_asset WHERE orig_url=%s", (orig_url,)
+            )
+            return cur.fetchone()
+    except Exception as e:
+        config.logger.warning(f"读取归档图片失败：{e}")
+        return None
+
+
+def image_asset_stats() -> dict:
+    """归档图片统计：张数 + 占用体积（用于侧栏展示）。"""
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(stored_bytes),0) AS bytes, "
+            "COALESCE(SUM(orig_bytes),0) AS orig FROM image_asset"
+        )
+        r = cur.fetchone()
+    return {"张数": r["n"], "占用": r["bytes"], "压缩前": r["orig"]}
