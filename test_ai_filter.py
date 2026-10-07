@@ -64,13 +64,16 @@ class TestThreeStateReturn(unittest.TestCase):
         ai_filter._reset_failures()
 
     def test_ai_relevant(self):
-        with patch.object(ai_filter._session, "post", return_value=_mock_post(_ai_payload(True, ["安全生产"]))):
-            self.assertEqual(ai_filter.is_relevant("某装置完成检修"), (True, ["安全生产"]))
+        # 必须显式注入 key：CI 环境无 .env，若不注入会走"未配置"分支返回 None
+        with patch.object(config, "ZHIPU_API_KEY", "test-key"):
+            with patch.object(ai_filter._session, "post", return_value=_mock_post(_ai_payload(True, ["安全生产"]))):
+                self.assertEqual(ai_filter.is_relevant("某装置完成检修"), (True, ["安全生产"]))
 
     def test_ai_not_relevant_returns_false_not_none(self):
         """关键：AI 正常工作但判定无关时返回 (False, [])，不能返回 None。"""
-        with patch.object(ai_filter._session, "post", return_value=_mock_post(_ai_payload(False))):
-            self.assertEqual(ai_filter.is_relevant("某地铁线路开通"), (False, []))
+        with patch.object(config, "ZHIPU_API_KEY", "test-key"):
+            with patch.object(ai_filter._session, "post", return_value=_mock_post(_ai_payload(False))):
+                self.assertEqual(ai_filter.is_relevant("某地铁线路开通"), (False, []))
 
     def test_api_error_returns_none(self):
         """API 全部失败时返回 None（调用方据此跳过而非丢弃）。"""
