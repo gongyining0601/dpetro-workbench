@@ -1627,7 +1627,10 @@ with tab_writing:
                 angle = st.text_input("写作角度（可选）", placeholder="如：人物故事、数据对比")
                 target = st.selectbox("目标媒体", ["中国石油报", "辽宁日报", "企业内网"])
             with col2:
-                word_count = st.slider("目标字数", 300, 2000, 800, 100)
+                # 2026-10-07 调整：短消息稿也要能写（最低 100 字），
+                # 上限收到 1000（原来 2000 太长，报社用稿多在 300~800 字）。
+                # 想改上限就动这里的 1000 一个数字。
+                word_count = st.slider("目标字数", 100, 1000, 800, 50)
             facts = st.text_area("已知事实/数据（可选）", placeholder="如：处理量同比+15%，创历史新高")
             submitted = st.form_submit_button("生成初稿", type="primary")
         if submitted:
