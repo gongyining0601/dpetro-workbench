@@ -1214,6 +1214,20 @@ with tab_material:
 
 # ----- Tab 5: 撰稿中心（行者撰稿 + 成稿体检）-----
 
+def _set_draft_content(title: str, body: str) -> None:
+    """统一入口：改写当前稿件内容时，必须连同"带 key 的输入框"一起更新。
+
+    这是 Streamlit 最容易中招的坑：控件一旦带了 key，就会记住自己上一次的值，
+    之后 `value=` 参数不再生效。只改 session_state 里的源变量（draft_title/body）
+    没用——界面继续显示旧内容，下一轮还会把旧内容反向写回 session_state。
+    典型症状：点开另一条草稿却还是上一篇、改过的名字被改回去。
+    """
+    st.session_state["draft_title"] = title
+    st.session_state["draft_body"] = body
+    st.session_state["draft_title_in"] = title
+    st.session_state["draft_body_in"] = body
+
+
 def _bj_time(iso_str: str | None) -> str:
     """把库里存的 UTC 时间转成北京时间显示（使用者在中国，看 UTC 会误判成"没保存"）。"""
     if not iso_str:
@@ -1248,7 +1262,7 @@ with tab_writing:
 
         # ---------- 我的草稿（云端持久化，避免刷新/关闭即丢失） ----------
         _pending_del = st.session_state.get("_pending_del_draft")
-        with st.expander("📂 我的草稿（点标题即可继续编辑）", expanded=False):
+        with st.expander("📂 我的草稿（点名字打开 · ✏️改名 · 🗑删除）", expanded=False):
             # 容错：草稿库读取失败不应连带整页报错（旧容器/网络抖动时曾出现）
             try:
                 _drafts = db.list_drafts(limit=30)
@@ -1261,14 +1275,61 @@ with tab_writing:
             elif not _drafts:
                 st.caption("暂无草稿。生成或修改稿件后会自动保存到这里。")
             else:
+                # ---------- 改名（草稿列表里直接改名字，不必先载入） ----------
+                _renaming = st.session_state.get("_renaming_draft")
+                _rtarget = next((x for x in _drafts if x["id"] == _renaming), None) if _renaming else None
+                if _renaming and _rtarget is None:
+                    st.session_state.pop("_renaming_draft", None)
+                if _rtarget is not None:
+                    with st.container(border=True):
+                        st.markdown("**✏️ 修改草稿名字**")
+                        _new_name = st.text_input(
+                            "新名字", value=_rtarget["title"] or "",
+                            key="draft_rename_in", max_chars=60,
+                            placeholder="给它起个好找的名字，如：冬供稿_辽报版_v3",
+                        )
+                        _rn1, _rn2 = st.columns(2)
+                        with _rn1:
+                            if st.button("✅ 保存名字", key="btn_rename_ok", type="primary"):
+                                _nn = (_new_name or "").strip()
+                                if not _nn:
+                                    st.warning("名字不能为空")
+                                else:
+                                    # 只改名字，正文/选题等原样带回，避免误伤内容
+                                    _rid = db.save_draft(
+                                        title=_nn,
+                                        body=_rtarget["body"] or "",
+                                        topic=_rtarget["topic"] or "",
+                                        angle=_rtarget["angle"] or "",
+                                        target_media=_rtarget["target_media"] or "",
+                                        draft_id=_rtarget["id"],
+                                    )
+                                    if _rid:
+                                        # 改的若是正在编辑那条，连显示、输入框和比对基准一起同步，
+                                        # 否则编辑框会拿旧名字把它盖回去
+                                        if st.session_state.get("current_draft_id") == _rtarget["id"]:
+                                            st.session_state["draft_title"] = _nn
+                                            st.session_state["draft_title_in"] = _nn
+                                            st.session_state["_saved_title"] = _nn
+                                            st.session_state["draft_saved_at"] = db.now_iso()
+                                        st.session_state["_flash_msg"] = f"✅ 草稿名字已改为「{_nn[:24]}」。"
+                                        st.session_state.pop("_renaming_draft", None)
+                                        st.rerun()
+                                    else:
+                                        st.error("改名失败，请稍后重试（稿件内容未动）。")
+                        with _rn2:
+                            if st.button("取消", key="btn_rename_cancel"):
+                                st.session_state.pop("_renaming_draft", None)
+                                st.rerun()
+
                 for _d in _drafts:
                     _is_cur = st.session_state.get("current_draft_id") == _d["id"]
-                    _c1, _c2 = st.columns([7, 1])
+                    _c1, _c2, _c3 = st.columns([6.2, 0.9, 0.9])
                     with _c1:
                         _label = ("▶ " if _is_cur else "") + (_d["title"] or "（无标题）")[:32]
                         if st.button(_label, key=f"draft_load_{_d['id']}", width="stretch"):
-                            st.session_state["draft_title"] = _d["title"] or ""
-                            st.session_state["draft_body"] = _d["body"] or ""
+                            # 关键：连 widget key 一起刷新，否则编辑框会停在上一篇
+                            _set_draft_content(_d["title"] or "", _d["body"] or "")
                             st.session_state["draft_topic"] = _d["topic"] or ""
                             st.session_state["draft_angle"] = _d["angle"] or ""
                             st.session_state["draft_target"] = _d["target_media"] or ""
@@ -1289,7 +1350,11 @@ with tab_writing:
                             + ("　·　当前打开" if _is_cur else "")
                         )
                     with _c2:
-                        if st.button("🗑", key=f"draft_del_{_d['id']}"):
+                        if st.button("✏️", key=f"draft_rename_{_d['id']}", help="修改这个草稿的名字"):
+                            st.session_state["_renaming_draft"] = _d["id"]
+                            st.rerun()
+                    with _c3:
+                        if st.button("🗑", key=f"draft_del_{_d['id']}", help="删除这个草稿"):
                             st.session_state["_pending_del_draft"] = _d["id"]
                             st.rerun()
                 if _pending_del:
@@ -1332,8 +1397,7 @@ with tab_writing:
                 with st.spinner("AI 正在撰写..."):
                     r = ai_writer.write_article(topic, angle, word_count, target, facts)
                 if r["ok"]:
-                    st.session_state["draft_title"] = r["title"] or ""
-                    st.session_state["draft_body"] = r["body"]
+                    _set_draft_content(r["title"] or "", r["body"])
                     st.session_state["draft_topic"] = topic
                     st.session_state["draft_angle"] = angle
                     st.session_state["draft_target"] = target
@@ -1363,8 +1427,13 @@ with tab_writing:
         if st.session_state.get("draft_body"):
             st.divider()
             st.markdown("#### 📄 当前稿件")
-            cur_title = st.text_input("标题", value=st.session_state["draft_title"], key="draft_title_in")
-            cur_body = st.text_area("正文", value=st.session_state["draft_body"], height=400, key="draft_body_in")
+            # 这两个输入框只由 key 管值（见 _set_draft_content），不再同时传 value=，
+            # 否则 Streamlit 每轮都会刷一条"Session State 与默认值冲突"的告警。
+            # setdefault 是兜底：万一外部没同步 key，也能显示正确内容而不是空白。
+            st.session_state.setdefault("draft_title_in", st.session_state.get("draft_title", ""))
+            st.session_state.setdefault("draft_body_in", st.session_state.get("draft_body", ""))
+            cur_title = st.text_input("标题", key="draft_title_in")
+            cur_body = st.text_area("正文", height=400, key="draft_body_in")
             # 同步编辑后的值回 session_state，供 AI 修改读取
             st.session_state["draft_title"] = cur_title
             st.session_state["draft_body"] = cur_body
@@ -1444,8 +1513,7 @@ with tab_writing:
                         with st.spinner("AI 正在修改..."):
                             rr = ai_writer.revise_article(cur_title, cur_body, rev_instr)
                         if rr["ok"]:
-                            st.session_state["draft_title"] = rr["title"]
-                            st.session_state["draft_body"] = rr["body"]
+                            _set_draft_content(rr["title"], rr["body"])
                             # 关键：先落库、再给提示、最后只 rerun 一次，
                             # 这样提示不会因为中途重跑而被丢掉
                             if st.session_state.get("draft_autosave", True):
@@ -1489,6 +1557,9 @@ with tab_writing:
                         st.session_state.pop("draft_title", None)
                         st.session_state.pop("draft_body", None)
                         st.session_state["current_draft_id"] = None
+                        # 连同输入框自己的 key 一起清，否则下次写新稿还会冒出旧内容
+                        st.session_state.pop("draft_title_in", None)
+                        st.session_state.pop("draft_body_in", None)
                         st.session_state.pop("_saved_title", None)
                         st.session_state.pop("_saved_body", None)
                         st.session_state.pop("draft_saved_at", None)
@@ -1512,7 +1583,10 @@ with tab_writing:
                     "- **💾 保存草稿**：把当前标题+正文存进草稿箱，**存完草稿列表立即更新**，不用刷新页面。\n"
                     "- **📄 另存为新草稿**：原稿不动，再存一份新的（相当于留一个版本快照，"
                     "改坏了可以回去拿旧的）。\n"
-                    "- **📂 我的草稿**：点标题即可载入继续编辑；带「▶」的是你当前正在编辑的那条。\n"
+                    "- **📂 我的草稿**：点名字即可载入继续编辑；带「▶」的是你当前正在编辑的那条。\n"
+                    "    - **✏️ 改名**：不用载入，直接在列表里给它换名字（正文内容不受影响）。\n"
+                    "    - **🗑 删除**：删掉这条（有二次确认）。\n"
+                    "    - 也可以在正文上方直接改「标题」再保存，效果一样。\n"
                     "- 直接改正文框也行，改完可以让 AI 按你的要求再改一遍。"
                 )
     # ----- Tab 8: 使用说明 -----
