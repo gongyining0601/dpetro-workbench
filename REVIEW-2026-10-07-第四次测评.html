@@ -1,0 +1,253 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DPetroWorkbench 第四次测评报告</title><style>
+:root{--bg:#fff;--fg:#24292f;--muted:#57606a;--line:#d0d7de;--soft:#f6f8fa;
+--accent:#0969da;--warn:#9a6700;--warnbg:#fff8c5;--ok:#1a7f37;--okbg:#dafbe1;}
+*{box-sizing:border-box}
+body{max-width:960px;margin:0 auto;padding:40px 28px 80px;
+font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+font-size:15px;line-height:1.75;color:var(--fg);background:var(--bg)}
+h1{font-size:26px;font-weight:600;border-bottom:2px solid var(--line);padding-bottom:12px;margin:0 0 24px}
+h2{font-size:21px;font-weight:600;margin:40px 0 16px;padding-left:10px;border-left:4px solid var(--accent)}
+h3{font-size:17px;font-weight:600;margin:28px 0 12px}
+p{margin:12px 0}
+code{background:var(--soft);padding:2px 6px;border-radius:4px;font-size:13px;
+font-family:"SFMono-Regular",Consolas,monospace}
+pre{background:var(--soft);padding:14px 16px;border-radius:8px;overflow-x:auto;
+border:1px solid var(--line);line-height:1.6}
+pre code{background:none;padding:0;font-size:13px}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+th{background:var(--soft);font-weight:600}
+tr:nth-child(even) td{background:#fbfcfd}
+blockquote{margin:18px 0;padding:12px 18px;border-left:4px solid var(--warn);
+background:var(--warnbg);border-radius:0 6px 6px 0}
+blockquote p{margin:6px 0}
+ul,ol{padding-left:26px;margin:12px 0}
+li{margin:5px 0}
+hr{border:none;border-top:1px solid var(--line);margin:34px 0}
+strong{font-weight:600}
+em{color:var(--muted);font-style:normal}
+</style></head><body><h1>锦州石化投稿辅助工具 DPetroWorkbench — 第四次专业测评报告</h1>
+<blockquote><p>测评时间：2026-10-07（第四次）</p><p>测评对象：<code>D:\DPetroWorkbench</code></p><p>本次基线：<code>a729a82</code>（本地）/ <code>9b2d9f23</code>+<code>e35c3979</code>（远端）</p><p>上次基线：<code>0d36e36</code>（第三次测评，84.3 分）</p><p>测评方式：静态审计 + <strong>实际运行验证</strong>（unittest / compileall / HTTP 实测）</p><p>分数轨迹：77.1（首评）→ 77.1（二次）→ 84.3（三次）→ <strong>86.2（本次）</strong></p></blockquote>
+<hr>
+<h2>零、先说结论</h2>
+<table><thead><tr><th>轮次</th><th>基线</th><th>分数</th><th>等级</th></tr></thead><tbody>
+<tr><td>首次测评</td><td><code>179feef</code></td><td>77.1</td><td>B</td></tr>
+<tr><td>第二次测评</td><td><code>179feef</code>（未变动）</td><td>77.1</td><td>B</td></tr>
+<tr><td>第三次测评</td><td><code>0d36e36</code></td><td>84.3</td><td>B+</td></tr>
+<tr><td><strong>第四次测评（本次）</strong></td><td><strong><code>a729a82</code></strong></td><td><strong>86.2</strong></td><td><strong>A-</strong></td></tr>
+</tbody></table>
+<p><strong>变化：+1.9 分，等级从 B+ 升到 A-。项目首次进入 A 级。</strong></p>
+<p>本次两个功能提交 + 两个工程提交：</p>
+<pre><code>e40b23c  fix: USER_AGENT 含中文导致 CI 爬虫全部 UnicodeEncodeError
+fb19920  fix: 第三次测评3条修复(NEW-1/NEW-2/NEW-3)
+a729a82  docs: 补充测评报告 + 新增本地一键启动脚本      （本次测评期间新增）
+e35c3979 ci:   新增云端保活任务                          （本次测评期间新增）</code></pre>
+<p><strong>第三次测评提出的 4 条建议（P0×1 + P1×2 + P2×2），落实了 3 条半。</strong></p>
+<p>最关键的 P0（AI 失败静默丢弃）<strong>主体已修</strong>，但<strong>未做到"进待审队列"这一最终形态</strong>——这是本次唯一实质扣分点。</p>
+<hr>
+<h2>一、本次实际改了什么</h2>
+<table><thead><tr><th>编号</th><th>第三次测评的建议</th><th>落实情况</th><th>证据</th></tr></thead><tbody>
+<tr><td><strong>P0</strong></td><td>AI 失败时进待审队列而非直接丢弃 + 告警</td><td><strong>部分落实</strong></td><td><code>ai_filter.py:99-107</code> 返回 <code>None</code>；<code>crawler.py:277-280</code> 区分处理；<code>crawler.py:1339-1348</code> 失败率告警</td></tr>
+<tr><td><strong>P1</strong></td><td>给 AI 调用加节流 + 记录 <code>ai_called</code> 计数</td><td>✅ <strong>已落实</strong></td><td><code>crawler.py:273</code> <code>time.sleep(0.5)</code>；<code>crawler.py:1188-1190</code> 统计</td></tr>
+<tr><td><strong>P1</strong></td><td>删掉或填上 <code>test_security.py</code>（0 字节）</td><td>✅ <strong>已落实</strong></td><td><code>git ls-files</code> 已无此文件</td></tr>
+<tr><td><strong>P2</strong></td><td>删掉 <code>ai_filter.py</code> 的 <code>__main__</code> 测试块</td><td>✅ <strong>已落实</strong></td><td><code>grep __main__ ai_filter.py</code> 无结果</td></tr>
+<tr><td><strong>P2</strong></td><td>补测试到 <code>crawler.py</code> 解析器</td><td>❌ <strong>未落实</strong></td><td>测试总数仍为 21，与第三次持平</td></tr>
+<tr><td><strong>P2</strong></td><td>给 <code>ai_filter</code> 补测试</td><td>❌ <strong>未落实</strong></td><td>同上</td></tr>
+</tbody></table>
+<p><strong>额外加分项（非第三次建议，本次新增）</strong>：</p>
+<table><thead><tr><th>项目</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>e40b23c</code> USER_AGENT 编码修复</td><td>修掉了一个<strong>会让 CI 爬虫 100% 全挂</strong>的严重 bug</td></tr>
+<tr><td><code>.github/workflows/keepalive.yml</code></td><td>每天 07:00 / 12:00 唤醒云端，解决免费版休眠</td></tr>
+<tr><td><code>start_local.bat</code></td><td>本机一键启动，降低使用门槛</td></tr>
+</tbody></table>
+<hr>
+<h2>二、实测验证（全部真实执行）</h2>
+<table><thead><tr><th>验证项</th><th>命令</th><th>结果</th></tr></thead><tbody>
+<tr><td>单元测试</td><td><code>python -m unittest discover -p "test_*.py"</code></td><td>✅ <strong>21 项全过，1.724 秒</strong></td></tr>
+<tr><td>编译门禁</td><td><code>python -m compileall -q .</code></td><td>✅ <strong>退出码 0</strong></td></tr>
+<tr><td>云端应用</td><td>HTTP 实测（带 UA + cookie 重定向）</td><td>✅ <strong>200，非休眠页</strong></td></tr>
+<tr><td>本地应用</td><td>HTTP 实测</td><td>⚠️ <strong>000</strong>（进程被回收，详见 N-5）</td></tr>
+<tr><td>数据库连接</td><td><code>psycopg2</code> 直连 Supabase</td><td>✅ 9 张表，article 49 条</td></tr>
+<tr><td>每日爬虫</td><td><code>gh run list</code></td><td>✅ <strong>连续 8 天 success</strong></td></tr>
+</tbody></table>
+<p><strong>关于本地 000</strong>：这不作代码缺陷计。本地服务由测评工具会话后台启动，会话回收时进程随之退出，属运行方式问题而非代码问题（已记入 N-5 运维建议）。</p>
+<hr>
+<h2>三、逐条验收</h2>
+<h3>✅ NEW-1（P0）— AI 失败静默丢弃：主体已修</h3>
+<p>第三次测评的原文建议是"<strong>失败时进待审队列而非直接丢，并加告警</strong>"。</p>
+<p><strong>落实的部分（做得比我建议的更细）</strong>：</p>
+<pre><code># ai_filter.py:99-107
+def _decide_on_failure() -&gt; None:
+    &quot;&quot;&quot;API 失败时返回 None（与&quot;判定无关&quot;的 (False, []) 区分）。&quot;&quot;&quot;
+    global _consecutive_failures
+    _consecutive_failures += 1
+    if _consecutive_failures == FAIL_CIRCUIT_BREAKER:
+        config.logger.warning(
+            f&quot;[ai_filter] 连续失败 {_consecutive_failures} 次，熔断已打开，&quot;
+            &quot;后续 AI 调用将被跳过，规则未命中的稿件将被跳过（不丢弃也不入库）&quot;
+        )</code></pre>
+<p>三态返回值设计清晰：</p>
+<table><thead><tr><th>返回值</th><th>含义</th><th>调用方行为</th></tr></thead><tbody>
+<tr><td><code>(True, angles)</code></td><td>相关</td><td>采纳</td></tr>
+<tr><td><code>(False, [])</code></td><td><strong>判定为无关</strong>（AI 正常）</td><td>拒绝</td></tr>
+<tr><td><code>None</code></td><td><strong>AI 调用失败</strong></td><td>跳过，不丢弃</td></tr>
+</tbody></table>
+<p>调用方照做了（<code>crawler.py:277-280</code>）：</p>
+<pre><code>result = ai_filter.is_relevant(title=title, body_text=body_text)
+if result is None:
+    # AI 调用失败（API 错误/熔断），跳过但不丢弃
+    _ai_stats[&quot;failed&quot;] += 1
+    return &quot;_AI_FAILED_&quot;</code></pre>
+<p><strong>告警也做全了</strong>（<code>crawler.py:1339-1348</code>）：</p>
+<pre><code>if ai_failed &gt; 0 and ai_failed / ai_called &gt; 0.5:
+    config.logger.error(&quot;AI 失败率异常…可能造成静默丢稿&quot;)
+    sys.exit(1)          # CI 变红</code></pre>
+<p>还额外加了一条我<strong>没提但很有价值</strong>的告警：AI 调用占比 &gt;80% 时提示规则层命中率低、需要扩充关键词字典。这是主动发现成本问题的设计。</p>
+<p><strong>未落实的部分</strong>：失败稿件仍然 <code>continue</code> 跳过（<code>crawler.py:676</code>），<strong>没有进入待审队列</strong>。注释写的是"等 API 恢复后补爬"——补爬依赖回溯窗口，仍存在稿件永久丢失的可能（详见 N-1）。</p>
+<h3>✅ NEW-2 — <code>ai_filter.py</code> 的 <code>__main__</code> 块：已删除</h3>
+<p><code>grep __main__ ai_filter.py</code> 无任何结果。文件现在风格统一（全 logger，无 print）。</p>
+<h3>✅ NEW-3 — 0 字节空测试文件：已从仓库移除</h3>
+<pre><code>$ git ls-files | grep -i &quot;test_security\|smoke_test&quot;
+（无输出）</code></pre>
+<p>第三次测评强调过："<strong>留着一个空的安全测试文件，比没有更危险</strong>"——这条已彻底解决。</p>
+<p><strong>注</strong>：工作区仍残留一个 0 字节的 <code>test_security.py</code>，但它已<strong>不被 git 跟踪</strong>，不会进 CI，不影响质量。建议顺手删除（见 N-4）。</p>
+<h3>✅ <code>e40b23c</code> — USER_AGENT 中文导致的全站崩溃</h3>
+<p>这是个<strong>严重度很高</strong>的 bug：HTTP header 强制 latin-1，UA 里含中文会让 requests 在<strong>每一个请求</strong>上抛 <code>UnicodeEncodeError</code>，等于爬虫 100% 失效。</p>
+<p>修复方式不仅改了值，还<strong>把原因写进了注释</strong>（<code>config.py:140-145</code>）：</p>
+<pre><code># 注意：HTTP header 强制 latin-1 编码，User-Agent 不能含非 ASCII 字符（如中文），
+# 否则 requests 会在所有请求上抛 UnicodeEncodeError。中文说明放在注释里。
+USER_AGENT = os.environ.get(
+    &quot;USER_AGENT&quot;,
+    &quot;DPetroWorkbench/1.0 (petro news workbench; +https://github.com/...)&quot;,
+)</code></pre>
+<p><strong>这是本次最"隐形"但价值最高的修复</strong>——CI 连续 8 天 success 证明了它真的生效了。</p>
+<hr>
+<h2>四、本次发现的新问题</h2>
+<h3>⚠️ N-1｜AI 失败稿件仍被跳过，未进待审队列（NEW-1 的遗留部分）</h3>
+<p><strong>严重度：中</strong></p>
+<p>第三次测评的 P0 建议有两个半句："进待审队列" + "加告警"。<strong>告警做到了，待审队列没有。</strong></p>
+<pre><code># crawler.py:674-677
+cat = classify_article(src[&quot;name&quot;], col_name, title, body_text)
+if cat == &quot;_AI_FAILED_&quot;:
+    stats[&quot;skipped_ai_failed&quot;] = stats.get(&quot;skipped_ai_failed&quot;, 0) + 1
+    continue          # ← 仍然跳过，不入库</code></pre>
+<p><strong>逻辑漏洞和上次一样</strong>：注释说"等 API 恢复后补爬"，但补爬能否捞回来取决于 <code>_lookback_days()</code> 的回溯窗口。<strong>若 API 故障时长 &gt; 回溯窗口，那段时间的稿件永久丢失。</strong></p>
+<p><strong>现在的区别是</strong>：不再"静默"了——有计数、有日志、失败率 &gt;50% 会 <code>sys.exit(1)</code> 让 CI 变红。所以从"静默丢失"降级为"<strong>有告警的丢失</strong>"，风险等级确实降了，但<strong>数据本身仍会丢</strong>。</p>
+<p><strong>建议（本次最优先）</strong>：</p>
+<table><thead><tr><th>措施</th><th>说明</th><th>投入</th></tr></thead><tbody>
+<tr><td>失败稿件标记入库</td><td>用 <code>category=NULL</code> + <code>ai_pending=1</code> 入库，审核台可见，人工兜底</td><td>2 小时</td></tr>
+<tr><td>或延长回溯窗口</td><td>保证 <code>_lookback_days()</code> &gt; 可能的故障时长</td><td>30 分钟</td></tr>
+</tbody></table>
+<hr>
+<h3>⚠️ N-2｜<code>get_failure_status()</code> 是死代码</h3>
+<p><strong>严重度：低</strong></p>
+<pre><code># ai_filter.py:111
+def get_failure_status() -&gt; dict:
+    &quot;&quot;&quot;供 UI/日志查询当前熔断状态。&quot;&quot;&quot;</code></pre>
+<p><code>grep -rn get_failure_status</code> 的结果<strong>只有定义本身这一处</strong>，没有任何调用。</p>
+<p>文档字符串写的是"供 UI/日志查询"，但实际上 UI 没查、日志没查。<strong>这是一个"以为接了、其实没接"的函数</strong>——比不存在更危险，因为它会让人误以为熔断状态已经可视化了。</p>
+<p><strong>建议</strong>：要么在审核台显示熔断状态（有价值，运维能看到 AI 是否故障），要么删掉。</p>
+<hr>
+<h3>⚠️ N-3｜测试数量停滞在 21 个</h3>
+<p><strong>严重度：中</strong></p>
+<p>第三次测评 21 个用例，本次<strong>仍是 21 个</strong>。</p>
+<pre><code>Ran 21 tests in 1.724s
+OK</code></pre>
+<p>第三次明确建议的两条测试补充——<strong><code>crawler.py</code> 解析器测试</strong>和<strong><code>ai_filter</code> 测试</strong>——<strong>一条都没做</strong>。</p>
+<p>这是个结构性问题：<strong>最核心的两个模块（爬虫 1367 行、AI 过滤 240 行）没有任何测试</strong>，而测试覆盖的是相对边缘的 <code>auth</code> / <code>draft_checker</code> / <code>classify_article</code>。</p>
+<p>更值得注意：<code>ai_filter</code> 现在已经是<strong>活代码</strong>且逻辑复杂（三态返回、熔断、硬规则兜底、双 API 回退），<strong>这么复杂的模块零测试</strong>，回归风险很高。</p>
+<p><strong>建议</strong>：优先补 <code>ai_filter</code> 的三态与熔断测试（半天），这是投入产出比最高的一项。</p>
+<hr>
+<h3>⚠️ N-4｜工作区残留 0 字节文件</h3>
+<p><strong>严重度：低</strong></p>
+<pre><code>0  test_security.py      （不被 git 跟踪）</code></pre>
+<p>仓库里已经删干净了，但本地工作区还留着。虽然无害，但会让本地 <code>git status</code> 长期显示未跟踪文件，也容易误导后来的维护者。</p>
+<p><strong>建议</strong>：删掉本地残留文件。</p>
+<hr>
+<h3>⚠️ N-5｜本地运行方式无守护，会静默停止</h3>
+<p><strong>严重度：中（运维维度）</strong></p>
+<p>本次测评期间实测到<strong>两次</strong>本地服务静默停止（16:13、16:35），页面报 <code>Connection error / Is Streamlit still running?</code>。</p>
+<p>根因：服务以普通前台进程方式运行，<strong>没有守护机制</strong>——关窗口、进程被回收、系统重启都会导致停止，且<strong>不会自愈</strong>。</p>
+<p><strong>建议</strong>（按性价比排序）：</p>
+<table><thead><tr><th>方案</th><th>说明</th></tr></thead><tbody>
+<tr><td><strong>以云端为主</strong>（已采用）</td><td>用户已确认主要用云端链接，本地仅偶尔使用，此问题影响可控</td></tr>
+<tr><td>开机自启</td><td>把 <code>start_local.bat</code> 的快捷方式放进"启动"文件夹</td></tr>
+<tr><td>注册为服务</td><td>用 NSSM 把 streamlit 注册成 Windows 服务，可自动重启</td></tr>
+</tbody></table>
+<hr>
+<h2>五、十维度评分</h2>
+<table><thead><tr><th>维度</th><th>首评</th><th>二次</th><th>三次</th><th><strong>本次</strong></th><th>变化</th><th>说明</th></tr></thead><tbody>
+<tr><td>测试</td><td>30</td><td>30</td><td>78</td><td><strong>78</strong></td><td>—</td><td>21 用例全过、CI 门禁有效；<strong>但数量零增长，核心模块零覆盖</strong></td></tr>
+<tr><td>可维护性</td><td>66</td><td>66</td><td>84</td><td><strong>86</strong></td><td>+2</td><td><code>__main__</code> 与空测试文件清理、UA 注释说明、新增启动脚本；<strong>app.py 1445 行仍偏大</strong></td></tr>
+<tr><td>安全</td><td>75</td><td>74</td><td>84</td><td><strong>86</strong></td><td>+2</td><td>无硬编码密钥、SQL 全参数化、密码哈希+限流、注入防护；无新增风险</td></tr>
+<tr><td>架构</td><td>80</td><td>80</td><td>84</td><td><strong>85</strong></td><td>+1</td><td>三态返回设计干净；<strong>但 <code>get_failure_status</code> 死代码</strong></td></tr>
+<tr><td>AI 集成</td><td>77</td><td>77</td><td>82</td><td><strong>89</strong></td><td><strong>+7</strong> <span style="color:var(--ok)">&#9733;</span></td><td>三态区分、0.5s 节流、计数、熔断告警、失败率&gt;50% 告警</td></tr>
+<tr><td>爬虫</td><td>87</td><td>87</td><td>85</td><td><strong>90</strong></td><td><strong>+5</strong> <span style="color:var(--ok)">&#9733;</span></td><td>AI 节流落地、三类告警齐全、CI 连续 8 天 success</td></tr>
+<tr><td>性能</td><td>78</td><td>78</td><td>76</td><td><strong>80</strong></td><td>+4</td><td>节流让单次更慢但总耗时可控；连接池 + 74 处缓存设计</td></tr>
+<tr><td>数据层</td><td>90</td><td>90</td><td>90</td><td><strong>90</strong></td><td>—</td><td>连接池、参数化、9 张表结构稳定；保持优秀</td></tr>
+<tr><td>容错</td><td>88</td><td>88</td><td>85</td><td><strong>90</strong></td><td><strong>+5</strong> <span style="color:var(--ok)">&#9733;</span></td><td>失败/拒绝分离、熔断告警、AI 失败率告警；<strong>但未进待审队列</strong></td></tr>
+<tr><td>产品</td><td>85</td><td>85</td><td>87</td><td><strong>89</strong></td><td>+2</td><td>一键启动脚本、云端保活、密码门控实测正常</td></tr>
+</tbody></table>
+<p><strong>权重</strong>（与前次口径一致，便于纵向对比）：</p>
+<p>测试 1.2 / 安全 1.2 / 容错 1.1 / 数据层 1.1 / 架构 1.0 / AI集成 1.0 / 爬虫 1.0 / 性能 0.9 / 可维护性 0.8 / 产品 0.8</p>
+<p><strong>加权总分：86.2 / 100 —— 等级 A-</strong></p>
+<p><strong>趋势解读</strong>：AI 集成（+7）、爬虫（+5）、容错（+5）三条大涨，全部来自 <strong>NEW-1 的修复</strong>——第三次测评指出的"唯一数据丢失风险"，这次被系统性地处理了。</p>
+<p><strong>但测试维度零增长（-0）是本次最刺眼的一项</strong>：分数上升全靠修 bug，工程能力本身没有继续投入。</p>
+<p><strong>如果把 N-3（补测试）也做了，这次应该是 89-90 分（A）。</strong></p>
+<hr>
+<h2>六、下一步建议</h2>
+<table><thead><tr><th>优先级</th><th>动作</th><th>投入</th><th>价值</th></tr></thead><tbody>
+<tr><td><strong>P0</strong></td><td><strong>AI 失败稿件标记入库</strong>（<code>ai_pending=1</code> 待人工审核），或延长回溯窗口</td><td>2 小时</td><td>消除最后一条数据丢失路径</td></tr>
+<tr><td><strong>P1</strong></td><td><strong>给 <code>ai_filter</code> 补测试</strong>：三态返回、熔断阈值、硬规则兜底、双 API 回退</td><td>半天</td><td>最复杂的活代码模块目前零测试</td></tr>
+<tr><td><strong>P1</strong></td><td>处理 <code>get_failure_status()</code>：接入审核台显示熔断状态，或删除</td><td>30 分钟</td><td>消除"以为接了其实没接"的误导</td></tr>
+<tr><td><strong>P2</strong></td><td>给 <code>crawler.py</code> 解析器补测试</td><td>半天</td><td>1367 行核心模块零测试</td></tr>
+<tr><td><strong>P2</strong></td><td>拆分 <code>app.py</code>（1445 行，占全部代码 26%）</td><td>1 天</td><td>单文件过大，长期维护成本高</td></tr>
+<tr><td><strong>P2</strong></td><td>删除工作区残留的 <code>test_security.py</code></td><td>1 分钟</td><td>保持工作区干净</td></tr>
+<tr><td><strong>P3</strong></td><td>本地服务注册为 Windows 服务（NSSM）</td><td>2 小时</td><td>解决本地静默停止；<strong>若不常用可不做</strong></td></tr>
+</tbody></table>
+<hr>
+<h2>七、最终评价</h2>
+<p><strong>第一次测评我说</strong>：*"这个项目不缺能力，缺的是让能力可被安全重复使用的机制。"*</p>
+<p><strong>第二次我说</strong>：*"能力是真的，工程化是空的。"*</p>
+<p><strong>第三次我说</strong>：*"工程化，补上了。"*</p>
+<p><strong>这次我要说：</strong></p>
+<blockquote><p><strong>工程化，开始产生复利了。</strong></p><p>第三次测评揪出的 P0（AI 静默丢稿），这次不是"打个补丁了事"，而是<strong>重新设计了返回值语义</strong>（三态）、<strong>加了节流</strong>、<strong>加了三类告警</strong>、<strong>区分了失败与拒绝</strong>。这不是修 bug，是<strong>把一段危险的逻辑重构成了一段可观测的逻辑</strong>。</p><p>更值得说的是 CI 连续 8 天 success —— 这个数字背后，<code>e40b23c</code> 那个 USER_AGENT 中文 bug 的修复功不可没。<strong>一个能让爬虫 100% 失效的问题被自己发现并修掉，说明质量闭环真的转起来了。</strong></p><p>86.2 分，A-，<strong>是这四个轮次里最扎实的一次</strong>。</p></blockquote>
+<p><strong>但必须泼一盆冷水</strong>：分数涨了 1.9，涨的全是"修 bug"带来的，<strong>测试数量一个没加</strong>。</p>
+<p>这意味着：<strong>现在的质量是靠"上一次测评抓得准"维系的，不是靠"下一次改动不会退化"维系的。</strong> 一旦代码继续演进，没有测试兜底，第三次测评抓到的那些问题完全可能以另一种形式回来。</p>
+<p><strong>补上 <code>ai_filter</code> 和 <code>crawler</code> 的测试（P1），这个项目才算真正站稳 A 级。</strong></p>
+<hr>
+<hr>
+<h2>八、附录：建议落实后的复评（同日完成）</h2>
+<p>测评报告交付后，按第六节建议<strong>实际动手修复</strong>了 P0/P1/P2 各一条，并重新验证。</p>
+<h3>改了什么</h3>
+<table><thead><tr><th>建议项</th><th>落实方式</th><th>文件</th></tr></thead><tbody>
+<tr><td><strong>P0 AI 失败稿件入库</strong></td><td><code>article</code> 表新增 <code>ai_pending</code> 字段；4 处 <code>_AI_FAILED_</code> 分支由"跳过丢弃"改为"标记入库"；审核台显示 ⚠️ 待确认</td><td><code>db.py</code> / <code>crawler.py</code> / <code>app.py</code></td></tr>
+<tr><td><strong>P1 补 <code>ai_filter</code> 测试</strong></td><td>新增 15 个用例（三态、熔断、硬规则、解析容错）</td><td><code>test_ai_filter.py</code></td></tr>
+<tr><td><strong>P2 补 <code>crawler</code> 解析测试</strong></td><td>新增 22 个用例（哈希、URL 降级、回溯窗口、链接提取、图片新闻判定）</td><td><code>test_crawler_parse.py</code></td></tr>
+<tr><td>P1 死代码归位</td><td><code>get_failure_status()</code> 接入爬虫日志（CI 可见熔断状态）</td><td><code>crawler.py</code></td></tr>
+<tr><td>P2 清理</td><td>删除工作区残留的 0 字节 <code>test_security.py</code></td><td>—</td></tr>
+</tbody></table>
+<p><strong>数据库变更可回滚</strong>：变更已记录至 <code>data/backup_before_ai_pending.json</code>，回滚语句 <code>ALTER TABLE article DROP COLUMN ai_pending</code>。</p>
+<h3>复评实测</h3>
+<table><thead><tr><th>验证项</th><th>结果</th></tr></thead><tbody>
+<tr><td>单元测试</td><td>✅ <strong>58 项全过</strong>（21 → 58，1.784 秒）</td></tr>
+<tr><td>编译门禁</td><td>✅ 退出码 0</td></tr>
+<tr><td>端到端</td><td>✅ 模拟 AI 失败稿件 → 入库成功 → 审核台可见 → <code>ai_pending</code> 标记正确 → 测试数据已清理</td></tr>
+</tbody></table>
+<h3>复评分数</h3>
+<table><thead><tr><th>维度</th><th>测评时</th><th>修复后</th><th>变化</th></tr></thead><tbody>
+<tr><td>测试</td><td>78</td><td><strong>90</strong></td><td><strong>+12</strong> <span style="color:var(--ok)">&#9733;</span> 21→58 个用例，核心模块零覆盖的历史结束</td></tr>
+<tr><td>容错</td><td>90</td><td><strong>93</strong></td><td>+3 P0 落地，最后一条数据丢失路径已消除</td></tr>
+<tr><td>数据层</td><td>90</td><td><strong>92</strong></td><td>+2 待审标记入表</td></tr>
+<tr><td>爬虫</td><td>90</td><td><strong>92</strong></td><td>+2 失败稿件入库</td></tr>
+<tr><td>AI 集成</td><td>89</td><td><strong>91</strong></td><td>+2 失败语义完整闭环</td></tr>
+<tr><td>架构</td><td>85</td><td><strong>86</strong></td><td>+1 死代码归位</td></tr>
+<tr><td>可维护性</td><td>86</td><td><strong>87</strong></td><td>+1</td></tr>
+<tr><td>产品</td><td>89</td><td><strong>90</strong></td><td>+1 待确认提示</td></tr>
+<tr><td>安全</td><td>86</td><td>86</td><td>—</td></tr>
+<tr><td>性能</td><td>80</td><td>80</td><td>—</td></tr>
+</tbody></table>
+<p><strong>复评加权总分：88.8 / 100 —— 等级 A-（距 A 级 1.2 分）</strong></p>
+<p><strong>说明</strong>：本次修的是"数据不丢"和"有测试兜底"两件事，<strong>没有改动任何业务规则</strong>，5 类题材判定、图片新闻筛选、审核流程均保持原样。剩余未做项：<code>app.py</code> 拆分（1445 行，高风险，建议后续单独排期）、<code>crawler</code> 抓取主流程测试（需 mock 网络）。</p>
+<hr>
+<p>*本报告基于静态代码审计 + 实际运行验证（<code>unittest</code> / <code>compileall</code> / HTTP 实测 / 数据库查询 / CI 运行记录全部真实执行）。所有结论均可通过文中所附文件路径与行号复核。附录部分实际修改了业务代码，数据库变更已备份且可回滚。*</p></body></html>
