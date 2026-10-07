@@ -1223,8 +1223,16 @@ with tab_writing:
         # ---------- 我的草稿（云端持久化，避免刷新/关闭即丢失） ----------
         _pending_del = st.session_state.get("_pending_del_draft")
         with st.expander("📂 我的草稿（点标题即可继续编辑）", expanded=False):
-            _drafts = db.list_drafts(limit=30)
-            if not _drafts:
+            # 容错：草稿库读取失败不应连带整页报错（旧容器/网络抖动时曾出现）
+            try:
+                _drafts = db.list_drafts(limit=30)
+                _draft_err = None
+            except Exception as _e:  # noqa: BLE001
+                _drafts, _draft_err = None, str(_e)[:200]
+            if _draft_err:
+                st.warning("⚠️ 草稿库暂时读不到（不影响其它功能）。稍后刷新重试即可。")
+                st.caption(f"技术细节：{_draft_err}")
+            elif not _drafts:
                 st.caption("暂无草稿。生成或修改稿件后会自动保存到这里。")
             else:
                 for _d in _drafts:
@@ -1254,7 +1262,18 @@ with tab_writing:
                     _dc1, _dc2 = st.columns(2)
                     with _dc1:
                         if st.button("✅ 确认删除", key="btn_draft_del_ok", type="primary"):
-                            db.delete_draft(_pending_del)
+                            try:
+                                _del_ok = bool(db.delete_draft(_pending_del))
+                                _del_err = None
+                            except Exception as _e:  # noqa: BLE001
+                                _del_ok, _del_err = False, str(_e)[:150]
+                            if _del_ok:
+                                st.session_state.pop("_pending_del_draft", None)
+                                if st.session_state.get("current_draft_id") == _pending_del:
+                                    st.session_state["current_draft_id"] = None
+                                st.rerun()
+                            else:
+                                st.error(f"删除失败（草稿仍在）：{_del_err or '未找到该草稿'}")
                             st.session_state.pop("_pending_del_draft", None)
                             if st.session_state.get("current_draft_id") == _pending_del:
                                 st.session_state["current_draft_id"] = None

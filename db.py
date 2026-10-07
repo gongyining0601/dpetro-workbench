@@ -120,6 +120,23 @@ CREATE TABLE IF NOT EXISTS draft_check (
     checked_at               TEXT NOT NULL
 );
 
+-- 撰稿中心草稿库（2026-10-07 新增）
+-- 此前稿件只存在浏览器内存（st.session_state），刷新/关页即丢且无历史。
+-- 建表语句必须放在这里，保证新环境（新库/新容器）首次启动即自动建表；
+-- 否则 app.py 调用 db.list_drafts 会因缺表直接报错。
+CREATE TABLE IF NOT EXISTS draft (
+    id              BIGSERIAL PRIMARY KEY,
+    title           TEXT,
+    body            TEXT,
+    topic           TEXT,
+    angle           TEXT,
+    target_media    TEXT,
+    status          TEXT DEFAULT 'draft',
+    created_at      TEXT,
+    updated_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_draft_updated_at ON draft(updated_at DESC);
+
 -- P3 语义向量索引表（替代旧的 data/article_vectors.npz 落盘文件）
 -- embedding 存 JSONB（向量列表），不引入 pgvector 扩展以省事
 -- 查询时一次性 SELECT 全表到内存，numpy 暴力 cosine（数据量小，千篇毫秒级）
