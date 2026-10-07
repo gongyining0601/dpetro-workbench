@@ -1,0 +1,28 @@
+name: Keep Cloud App Awake
+
+# Streamlit Community Cloud 免费版在长时间无访问后会自动休眠，
+# 单位电脑打开链接会看到 "app has gone to sleep"，需手动点唤醒并等 1~2 分钟。
+# 本任务在上班前与午休后各访问一次云端应用，触发自动唤醒，
+# 使本机无需开机也能随时打开即用。
+on:
+  schedule:
+    # UTC 23:00 = 北京时间次日 07:00（上班前唤醒）
+    - cron: "0 23 * * *"
+    # UTC 04:00 = 北京时间当日 12:00（午休后补一次，覆盖下午）
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping cloud app
+        run: |
+          url="https://dpetro-workbench-ewbdymsgjrsyzqeaxmzrdm.streamlit.app/"
+          # 应用可能返回 303（跳转登录/唤醒页），均属正常，只要收到 HTTP 响应即已触发唤醒
+          code=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 60 "$url" || echo "000")
+          echo "云端响应码: $code"
+          if [ "$code" = "000" ]; then
+            echo "::warning::未收到响应，云端可能仍未唤醒，请手动打开一次链接"
+          fi
