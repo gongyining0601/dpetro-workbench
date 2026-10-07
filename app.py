@@ -59,6 +59,8 @@ def _normalize_display_url(url: str) -> str:
 
 
 _IMG_CACHE: dict[str, str] = {}
+# 记录每张图失败的原因，用于给使用者看人话提示（而不是一句笼统的"暂不可用"）
+_IMG_FAIL_REASON: dict[str, str] = {}
 _MAX_IMG_BYTES = 3 * 1024 * 1024  # 单图 3MB 上限，避免超大图拖慢页面
 # 磁盘持久化缓存目录（Streamlit 重启后仍有效，避免重复下载）
 _IMG_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".img_cache")
@@ -161,27 +163,55 @@ def _disk_cache_path(url: str) -> str:
 
 def _load_disk_cache(url: str) -> str | None:
     """从磁盘缓存加载 base64 data URI。
-    返回 None 表示缓存不存在；返回 "" 表示之前下载失败过（缓存失败结果）。
+
+    返回值约定：
+    - "data:..." 开头 = 成功缓存，直接用
+    - "" = 最近刚失败过（24 小时内，别再浪费时间重打）
+    - None = 无缓存 / 失败已超过 24 小时（应该重试）
     """
     path = _disk_cache_path(url)
     if not os.path.exists(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+            content = f.read()
     except Exception:
         return None
+    if content.startswith("data:"):
+        return content  # 成功缓存
+    if content.startswith("{"):
+        # 新版失败标记：{"fail": <时间戳>}，24 小时后自动重试
+        try:
+            ts = float(json.loads(content).get("fail", 0))
+            if (time.time() - ts) < _FAIL_RETRY_SECONDS:
+                return ""
+        except Exception:
+            pass
+        return None
+    # 兼容旧版：空字符串文件是失败标记但没有时间戳，视为已过期，重试一次
+    return None
+
+
+# 图片下载失败后隔多久重试一次（此前失败也缓存 30 天，报社临时抽风会让图"死"一个月）
+_FAIL_RETRY_SECONDS = 24 * 3600
 
 
 _last_cache_cleanup = 0.0  # 上次清理时间戳，避免频繁扫描
 
 
 def _save_disk_cache(url: str, data_uri: str):
-    """保存 base64 data URI 到磁盘缓存，并定期检查大小限制。"""
+    """保存 base64 data URI 到磁盘缓存，并定期检查大小限制。
+
+    data_uri 为空 = 失败标记，写成带时间戳的 JSON（24 小时后自动重试），
+    避免报社网站临时抽风导致图片被"判死"30 天。
+    """
     path = _disk_cache_path(url)
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write(data_uri)
+            if data_uri:
+                f.write(data_uri)
+            else:
+                f.write(json.dumps({"fail": time.time()}))
     except Exception:
         return
     # 定期检查缓存大小（避免每次保存都扫描）
@@ -248,6 +278,7 @@ def _img_to_data_uri(url: str) -> str:
         resp = requests.get(req_url, headers=headers, timeout=15, verify=verify, stream=True)
         if resp.status_code != 200:
             _IMG_CACHE[url] = ""
+            _IMG_FAIL_REASON[url] = "removed" if resp.status_code in (404, 410) else "blocked"
             _save_disk_cache(url, "")
             config.logger.info("img_fail status=%s url=%s", resp.status_code, url[:120])
             return ""
@@ -264,6 +295,7 @@ def _img_to_data_uri(url: str) -> str:
             inferred = ext_to_ct.get(ext_match.group(1).lower()) if ext_match else None
             if not inferred:
                 _IMG_CACHE[url] = ""
+                _IMG_FAIL_REASON[url] = "removed"  # 200 但返回的是网页 = 原图已被源站下架
                 _save_disk_cache(url, "")
                 config.logger.info("img_fail bad_ct=%s url=%s", content_type, url[:120])
                 return ""
@@ -272,12 +304,14 @@ def _img_to_data_uri(url: str) -> str:
         content = resp.content
         if len(content) > _MAX_IMG_BYTES:
             _IMG_CACHE[url] = ""
+            _IMG_FAIL_REASON[url] = "toolarge"
             _save_disk_cache(url, "")
             config.logger.info("img_fail too_large=%s url=%s", len(content), url[:120])
             return ""
         # magic bytes 校验：确保下载的真的是图片（防 HTML 错误页）
         if not _is_image_bytes(content):
             _IMG_CACHE[url] = ""
+            _IMG_FAIL_REASON[url] = "removed"
             _save_disk_cache(url, "")
             config.logger.info("img_fail not_image_bytes url=%s", url[:120])
             return ""
@@ -288,6 +322,7 @@ def _img_to_data_uri(url: str) -> str:
         return data_uri
     except Exception as e:
         _IMG_CACHE[url] = ""
+        _IMG_FAIL_REASON[url] = "unreachable"
         _save_disk_cache(url, "")
         config.logger.info("img_fail except=%s url=%s", type(e).__name__, url[:120])
         return ""
@@ -299,8 +334,16 @@ def _render_image(url: str):
     data_uri = _img_to_data_uri(u)
     if data_uri:
         st.image(data_uri, width="stretch")
-    else:
-        st.caption("🖼️ 图片暂不可用（图源限制或已过期）")
+        return
+    reason = _IMG_FAIL_REASON.get(u, "")
+    _REASON_TEXT = {
+        # 200 但拿回来的是网页：报社网站改版/换系统，原图文件已被下架
+        "removed": "🖼️ 图片已失效 —— 报社网站改版，原图已从源站下架，无法找回",
+        "blocked": "🖼️ 图片被图源限制访问（防盗链），暂无法显示",
+        "unreachable": "🖼️ 网络原因暂时取不到图，系统会在 24 小时内自动重试",
+        "toolarge": "🖼️ 图片过大，无法显示",
+    }
+    st.caption(_REASON_TEXT.get(reason, "🖼️ 图片暂不可用（图源限制或已过期）"))
 
 
 def _preload_images(urls: list[str], max_workers: int = 8) -> None:
