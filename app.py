@@ -23,7 +23,7 @@ import re
 import time
 import base64
 import hashlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1213,12 +1213,38 @@ with tab_material:
 
 
 # ----- Tab 5: 撰稿中心（行者撰稿 + 成稿体检）-----
+
+def _bj_time(iso_str: str | None) -> str:
+    """把库里存的 UTC 时间转成北京时间显示（使用者在中国，看 UTC 会误判成"没保存"）。"""
+    if not iso_str:
+        return ""
+    try:
+        return (datetime.fromisoformat(iso_str) + timedelta(hours=8)).strftime("%m-%d %H:%M:%S")
+    except Exception:  # noqa: BLE001
+        return str(iso_str)[:19].replace("T", " ")
+
+
+def _draft_save_status(dirty: bool) -> str:
+    """草稿保存状态文案。dirty=True 表示内容与库里不一致（有未入库的改动）。"""
+    if dirty:
+        return "⚠️ 有未保存的修改（点「保存草稿」立即入库）"
+    saved_at = st.session_state.get("draft_saved_at")
+    if saved_at:
+        return f"✅ 已保存 · {_bj_time(saved_at)}（北京时间）· 存于云端草稿箱"
+    return "尚未保存"
+
+
 with tab_writing:
     sub_writer, sub_check = st.tabs(["✍️ 行者撰稿", "📝 成稿体检"])
     with sub_writer:
         st.subheader("✍️ 行者撰稿")
         st.caption("AI 辅助生成新闻稿初稿（智谱 GLM-4.7-Flash，失败回退腾讯云 deepseek）。"
-                   "稿件自动存入云端草稿库，换电脑、关页面都能找回。")
+                   "稿件存入云端草稿库，换电脑、关页面都能找回。")
+
+        # 跨 rerun 的一次性提示（保存成功等）在这里落地，避免刷新后提示消失
+        _flash = st.session_state.pop("_flash_msg", None)
+        if _flash:
+            st.success(_flash)
 
         # ---------- 我的草稿（云端持久化，避免刷新/关闭即丢失） ----------
         _pending_del = st.session_state.get("_pending_del_draft")
@@ -1236,9 +1262,10 @@ with tab_writing:
                 st.caption("暂无草稿。生成或修改稿件后会自动保存到这里。")
             else:
                 for _d in _drafts:
+                    _is_cur = st.session_state.get("current_draft_id") == _d["id"]
                     _c1, _c2 = st.columns([7, 1])
                     with _c1:
-                        _label = (_d["title"] or "（无标题）")[:32]
+                        _label = ("▶ " if _is_cur else "") + (_d["title"] or "（无标题）")[:32]
                         if st.button(_label, key=f"draft_load_{_d['id']}", width="stretch"):
                             st.session_state["draft_title"] = _d["title"] or ""
                             st.session_state["draft_body"] = _d["body"] or ""
@@ -1248,10 +1275,18 @@ with tab_writing:
                             st.session_state["current_draft_id"] = _d["id"]
                             st.session_state["_saved_title"] = _d["title"] or ""
                             st.session_state["_saved_body"] = _d["body"] or ""
+                            # 载入的草稿本来就是库里已有的，带上入库时间，
+                            # 否则状态栏会误显示"尚未保存"（曾把使用者绕晕）
+                            st.session_state["draft_saved_at"] = _d["updated_at"]
+                            st.session_state["_flash_msg"] = (
+                                f"已载入草稿「{(_d['title'] or '无标题')[:24]}」，"
+                                "可直接编辑或让 AI 修改。"
+                            )
                             st.rerun()
                         st.caption(
-                            f"{(_d['updated_at'] or '')[:16].replace('T', ' ')} · "
+                            f"{_bj_time(_d['updated_at'])} · "
                             f"{_d['target_media'] or '未指定媒体'}"
+                            + ("　·　当前打开" if _is_cur else "")
                         )
                     with _c2:
                         if st.button("🗑", key=f"draft_del_{_d['id']}"):
@@ -1312,9 +1347,15 @@ with tab_writing:
                         st.session_state["_saved_title"] = r["title"] or ""
                         st.session_state["_saved_body"] = r["body"]
                         st.session_state["draft_saved_at"] = db.now_iso()
-                        st.toast("初稿已生成并自动保存，可在下方继续修改", icon="✍️")
+                        st.session_state["_flash_msg"] = (
+                            "✍️ 初稿已生成并入库（先存一份保底，不会丢）。"
+                            "如需再改，可在下方编辑后点「保存草稿」。"
+                        )
+                        # 重跑一次，让上方「我的草稿」立刻能看到这条新稿
+                        st.rerun()
                     else:
-                        st.toast("初稿已生成（保存失败，请手动点保存）", icon="⚠️")
+                        st.warning("初稿已生成，但入库失败。请点下方「💾 保存草稿」重试，"
+                                   "或先复制正文保底。")
                 else:
                     st.error(f"生成失败：{r['error']}")
 
@@ -1328,27 +1369,64 @@ with tab_writing:
             st.session_state["draft_title"] = cur_title
             st.session_state["draft_body"] = cur_body
 
-            # 自动保存：内容与上次入库值不同就落库，防止刷新/关闭丢稿
-            if (cur_title, cur_body) != (
+            # ---------- 保存控制条：使用者自己决定什么时候存 ----------
+            _dirty = (cur_title, cur_body) != (
                 st.session_state.get("_saved_title"), st.session_state.get("_saved_body")
-            ):
+            )
+            _sc1, _sc2, _sc3 = st.columns([1.1, 1.2, 2.0])
+            with _sc1:
+                _click_save = st.button(
+                    "💾 保存草稿", type="primary", key="btn_save_draft",
+                    help="把当前标题和正文存入云端草稿箱，存完立刻刷新下方/上方草稿列表",
+                )
+            with _sc2:
+                _click_save_as = st.button(
+                    "📄 另存为新草稿", key="btn_saveas_draft",
+                    help="保留当前这条不动，另存一份新草稿（相当于留一个版本快照）",
+                )
+            with _sc3:
+                _autosave = st.toggle(
+                    "自动保存（改动即入库）", value=True, key="draft_autosave",
+                    help="开启：正文一改就自动入库，最保险；关闭：只有点「保存草稿」才入库，"
+                         "完全由你决定，但关页面前请记得点保存。",
+                )
+
+            # 谁触发保存：手动 > 另存 > 自动兜底
+            _save_mode = None
+            if _click_save:
+                _save_mode = "manual"
+            elif _click_save_as:
+                _save_mode = "copy"
+            elif _dirty and _autosave:
+                _save_mode = "auto"
+
+            if _save_mode:
                 _did = db.save_draft(
                     title=cur_title, body=cur_body,
                     topic=st.session_state.get("draft_topic", ""),
                     angle=st.session_state.get("draft_angle", ""),
                     target_media=st.session_state.get("draft_target", ""),
-                    draft_id=st.session_state.get("current_draft_id"),
+                    # 另存为：不带 draft_id → 库里新增一条，原稿不动
+                    draft_id=None if _save_mode == "copy" else st.session_state.get("current_draft_id"),
                 )
                 if _did:
                     st.session_state["current_draft_id"] = _did
                     st.session_state["_saved_title"] = cur_title
                     st.session_state["_saved_body"] = cur_body
                     st.session_state["draft_saved_at"] = db.now_iso()
-            _saved_at = st.session_state.get("draft_saved_at")
-            if _saved_at:
-                st.caption(f"💾 已自动保存（{_saved_at[11:19]} UTC）· 存于云端草稿库，可随时找回")
-            else:
-                st.caption("尚未保存")
+                    if _save_mode == "manual":
+                        st.session_state["_flash_msg"] = "✅ 已保存到云端草稿箱。"
+                    elif _save_mode == "copy":
+                        st.session_state["_flash_msg"] = (
+                            "✅ 已另存为新草稿（原稿保持不变）。可在「我的草稿」中切换。"
+                        )
+                    # 关键：保存后立刻重跑一次，让草稿列表立即出现这一条，
+                    # 不用再手动刷新页面（此前列表渲染在上方，本轮拿不到新数据）
+                    st.rerun()
+                else:
+                    st.error("保存失败（稿件未入库）。请检查网络后重试，或先手动复制一份正文保底。")
+
+            st.caption(_draft_save_status(_dirty))
 
             st.markdown("#### 🔧 AI 修改")
             rev_instr = st.text_area(
@@ -1368,7 +1446,30 @@ with tab_writing:
                         if rr["ok"]:
                             st.session_state["draft_title"] = rr["title"]
                             st.session_state["draft_body"] = rr["body"]
-                            st.toast("修改完成", icon="✅")
+                            # 关键：先落库、再给提示、最后只 rerun 一次，
+                            # 这样提示不会因为中途重跑而被丢掉
+                            if st.session_state.get("draft_autosave", True):
+                                _rid = db.save_draft(
+                                    title=rr["title"], body=rr["body"],
+                                    topic=st.session_state.get("draft_topic", ""),
+                                    angle=st.session_state.get("draft_angle", ""),
+                                    target_media=st.session_state.get("draft_target", ""),
+                                    draft_id=st.session_state.get("current_draft_id"),
+                                )
+                                if _rid:
+                                    st.session_state["current_draft_id"] = _rid
+                                    st.session_state["_saved_title"] = rr["title"]
+                                    st.session_state["_saved_body"] = rr["body"]
+                                    st.session_state["draft_saved_at"] = db.now_iso()
+                                    st.session_state["_flash_msg"] = "✅ AI 修改完成，已自动保存到草稿箱。"
+                                else:
+                                    st.session_state["_flash_msg"] = (
+                                        "✅ AI 修改完成，但自动保存失败。请点「💾 保存草稿」。"
+                                    )
+                            else:
+                                st.session_state["_flash_msg"] = (
+                                    "✅ AI 修改完成。自动保存已关闭，请点「💾 保存草稿」入库。"
+                                )
                             st.rerun()
                         else:
                             st.error(f"修改失败：{rr['error']}")
@@ -1390,13 +1491,30 @@ with tab_writing:
                         st.session_state["current_draft_id"] = None
                         st.session_state.pop("_saved_title", None)
                         st.session_state.pop("_saved_body", None)
+                        st.session_state.pop("draft_saved_at", None)
                         st.session_state.pop("_confirm_clear_draft", None)
+                        st.session_state["_flash_msg"] = (
+                            "已清空当前编辑区。云端草稿箱里的稿件没有删除，"
+                            "可在上方「我的草稿」随时载入。"
+                        )
                         st.rerun()
                 with cc2:
                     if st.button("取消", key="btn_clear_draft_cancel"):
                         st.session_state.pop("_confirm_clear_draft", None)
                         st.rerun()
-            st.caption("提示：可直接在正文框手动编辑，再提修改要求让 AI 改；修改会覆盖当前稿件。")
+            with st.expander("❓ 怎么用（保存规则一看就懂）", expanded=False):
+                st.markdown(
+                    "- **生成初稿时会先存一份到草稿箱**（保底，不会丢）。\n"
+                    "- 之后的改动要不要存，由你决定：\n"
+                    "    - **自动保存打开（默认）**：正文一改就自动入库，最省心。\n"
+                    "    - **自动保存关闭**：只有点「💾 保存草稿」才入库。"
+                    "状态栏会提示「⚠️ 有未保存的修改」，关页面前记得点一下。\n"
+                    "- **💾 保存草稿**：把当前标题+正文存进草稿箱，**存完草稿列表立即更新**，不用刷新页面。\n"
+                    "- **📄 另存为新草稿**：原稿不动，再存一份新的（相当于留一个版本快照，"
+                    "改坏了可以回去拿旧的）。\n"
+                    "- **📂 我的草稿**：点标题即可载入继续编辑；带「▶」的是你当前正在编辑的那条。\n"
+                    "- 直接改正文框也行，改完可以让 AI 按你的要求再改一遍。"
+                )
     # ----- Tab 8: 使用说明 -----
 
     with sub_check:
