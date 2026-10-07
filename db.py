@@ -267,17 +267,23 @@ def init_db() -> None:
 def upsert_article(column_id: int, *, title: str, url: str, author: str | None,
                    publish_date: str | None, summary: str | None,
                    body_text: str | None, content_hash: str | None,
-                   has_image: bool = False, image_urls: str | None = None) -> bool:
-    """插入新文章；URL 唯一约束命中则跳过。返回是否新增。"""
+                   has_image: bool = False, image_urls: str | None = None,
+                   ai_pending: bool = False) -> bool:
+    """插入新文章；URL 唯一约束命中则跳过。返回是否新增。
+
+    ai_pending=True 表示 AI 过滤失败、未能判定分类，稿件仍入库并标记待人工确认，
+    避免因 API 故障导致稿件永久丢失（第四次测评 P0 修复）。
+    """
     with get_conn() as c:
         cur = conn_cursor(c)
         cur.execute(
             "INSERT INTO article"
             "(column_id, title, url, author, publish_date, summary, body_text,"
-            " content_hash, crawled_at, has_image, image_urls) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            " content_hash, crawled_at, has_image, image_urls, ai_pending)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (url) DO NOTHING",
             (column_id, title, url, author, publish_date, summary,
-             body_text, content_hash, now_iso(), has_image, image_urls),
+             body_text, content_hash, now_iso(), has_image, image_urls, ai_pending),
         )
         return cur.rowcount > 0
 
@@ -288,6 +294,7 @@ def fetch_unreviewed(limit: int = 50):
         cur.execute(
             "SELECT a.id, a.title, a.url, a.author, a.publish_date, a.summary, "
             "LEFT(a.body_text, 500) AS body_text, a.crawled_at, a.has_image, a.image_urls, "
+            "a.ai_pending, "
             "c.name AS column_name, s.name AS source_name "
             "FROM article a "
             "LEFT JOIN review_record r ON r.article_id = a.id "

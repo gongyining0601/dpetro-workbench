@@ -671,11 +671,12 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col_name, title, body_text)
+            ai_pending = False
             if cat == "_AI_FAILED_":
-                # AI 调用失败：跳过但不计入"无关丢弃"，等 API 恢复后补爬
+                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
+                ai_pending = True
                 stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-                continue
-            if not cat:
+            elif not cat:
                 stats["skipped_category"] = stats.get("skipped_category", 0) + 1
                 continue
             # 【新规则3】只存图注/短说明，弃长正文
@@ -683,7 +684,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
             added = db.upsert_article(
                 col_id, title=title, url=_normalize_url(art_url), author=author,
                 publish_date=publish_date, summary=short_text[:80], body_text=short_text,
-                content_hash=content_hash(short_text), has_image=True, image_urls=image_urls,
+                content_hash=content_hash(short_text), has_image=True, image_urls=image_urls, ai_pending=ai_pending,
             )
             if added:
                 stats["added"] += 1
@@ -855,10 +856,12 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            ai_pending = False
             if cat == "_AI_FAILED_":
+                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
+                ai_pending = True
                 stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-                continue
-            if not cat:
+            elif not cat:
                 stats["skipped_category"] = stats.get("skipped_category", 0) + 1
                 continue
             # 【新规则3】只存图注/短说明，弃长正文
@@ -867,7 +870,7 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
                 col_id, title=art.title, url=_normalize_url(link.url), author=art.author,
                 publish_date=art.publish_date, summary=short_text[:80],
                 body_text=short_text, content_hash=content_hash(short_text),
-                has_image=True, image_urls=art.image_urls,
+                has_image=True, image_urls=art.image_urls, ai_pending=ai_pending,
             )
             if added:
                 stats["added"] += 1
@@ -938,10 +941,12 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            ai_pending = False
             if cat == "_AI_FAILED_":
+                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
+                ai_pending = True
                 stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-                continue
-            if not cat:
+            elif not cat:
                 stats["skipped_category"] += 1
                 continue
             # 【新规则3】只存图注/短说明，弃长正文
@@ -950,7 +955,7 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
                 col_id, title=art.title, url=_normalize_url(link.url), author=art.author,
                 publish_date=art.publish_date, summary=short_text[:80],
                 body_text=short_text, content_hash=content_hash(short_text),
-                has_image=True, image_urls=art.image_urls,
+                has_image=True, image_urls=art.image_urls, ai_pending=ai_pending,
             )
             if added:
                 stats["added"] += 1
@@ -1118,10 +1123,12 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
                 continue
             # 【新规则2】只保留 5 类
             cat = classify_article(src["name"], col["name"], art.title, art.body_text)
+            ai_pending = False
             if cat == "_AI_FAILED_":
+                # P0 修复：AI 失败不再丢弃，标记入库待人工确认，避免永久丢稿
+                ai_pending = True
                 stats["skipped_ai_failed"] = stats.get("skipped_ai_failed", 0) + 1
-                continue
-            if not cat:
+            elif not cat:
                 stats["skipped_category"] += 1
                 continue
             # 【新规则3】只存图注/短说明
@@ -1130,7 +1137,7 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
                 col_id, title=art.title, url=_normalize_url(link.url), author=art.author,
                 publish_date=art.publish_date, summary=short_text[:80],
                 body_text=short_text, content_hash=content_hash(short_text),
-                has_image=True, image_urls=art.image_urls,
+                has_image=True, image_urls=art.image_urls, ai_pending=ai_pending,
             )
             if added:
                 stats["added"] += 1
@@ -1330,11 +1337,15 @@ def main():
     # AI 调用统计：若 AI 被调用，打印调用/接受/拒绝/失败数
     ai_called = stats.get("ai_called", 0)
     if ai_called:
+        # 熔断状态由 ai_filter 进程内维护，在此落到 CI 日志便于运维查看
+        _fs = ai_filter.get_failure_status()
         config.logger.info(
             f"AI 过滤统计：调用 {ai_called}，"
             f"接受 {stats.get('ai_accepted', 0)}，"
             f"拒绝 {stats.get('ai_rejected', 0)}，"
-            f"失败 {stats.get('ai_failed', 0)}"
+            f"失败 {stats.get('ai_failed', 0)}；"
+            f"熔断状态={'已打开' if _fs['circuit_open'] else '正常'}"
+            f"（连续失败 {_fs['consecutive_failures']}/阈值 {_fs['threshold']}）"
         )
         # 异常告警1：AI 失败率畸高（>50%），规则层可能失效或 API 持续故障
         ai_failed = stats.get("ai_failed", 0)

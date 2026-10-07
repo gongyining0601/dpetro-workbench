@@ -790,6 +790,12 @@ with tab_review:
                         f"{r['source_name']} · {r['column_name']} · "
                         f"{r['publish_date'] or '日期不详'} · 作者: {r['author'] or '不详'}"
                     )
+                    if r.get("ai_pending"):
+                        st.warning(
+                            "⚠️ 待确认：AI 判定时接口故障，未归入 5 类题材，"
+                            "请人工判断后再保存或删除。",
+                            icon="⚠️",
+                        )
                     with st.expander("摘要 / 详情"):
                         # 展示图片（image_urls 是 JSON 字符串数组）
                         img_urls_raw = r.get("image_urls")
