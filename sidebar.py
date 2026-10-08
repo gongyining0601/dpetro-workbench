@@ -56,122 +56,122 @@ def render_sidebar(chroma_stats: dict) -> None:
         st.caption("提示：要在审核台看到真实稿件，需在 config.py 里填好栏目 URL 并运行 `python crawler.py`。")
         st.divider()
         st.subheader("🧠 语义对标库")
-    if chroma_stats.get("fallback"):
-        st.warning("回退关键词检索（Silicon Flow API 或向量库初始化失败）")
-        if chroma_stats.get("error"):
-            st.caption(f"错误：{chroma_stats['error']}")
-    else:
-        st.metric("已建索引稿件", chroma_stats.get("in_index", 0))
-        st.caption(
-            f"本次：新增 {chroma_stats.get('added', 0)} / "
-            f"删除 {chroma_stats.get('removed', 0)}"
-        )
-        st.caption("嵌入：智谱 embedding-3（Zhipu API）")
-        if chroma_stats.get("error"):
-            st.caption(f"⚠️ 同步警告：{chroma_stats['error']}")
-        st.divider()
-        st.subheader("🧹 数据维护")
-        if st.button("清理历史非图片新闻", key="btn_cleanup_nonphoto", width="stretch"):
-            st.session_state["_confirm_cleanup"] = True
-            st.rerun()
-        if st.session_state.get("_confirm_cleanup"):
-            st.warning("⚠️ 将删除 has_image=FALSE 或 body_text >300 字的稿件，不可恢复。")
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("✅ 确认清理", key="btn_cleanup_confirm", type="primary", width="stretch"):
+        if chroma_stats.get("fallback"):
+            st.warning("回退关键词检索（Silicon Flow API 或向量库初始化失败）")
+            if chroma_stats.get("error"):
+                st.caption(f"错误：{chroma_stats['error']}")
+        else:
+            st.metric("已建索引稿件", chroma_stats.get("in_index", 0))
+            st.caption(
+                f"本次：新增 {chroma_stats.get('added', 0)} / "
+                f"删除 {chroma_stats.get('removed', 0)}"
+            )
+            st.caption("嵌入：智谱 embedding-3（Zhipu API）")
+            if chroma_stats.get("error"):
+                st.caption(f"⚠️ 同步警告：{chroma_stats['error']}")
+            st.divider()
+            st.subheader("🧹 数据维护")
+            if st.button("清理历史非图片新闻", key="btn_cleanup_nonphoto", width="stretch"):
+                st.session_state["_confirm_cleanup"] = True
+                st.rerun()
+            if st.session_state.get("_confirm_cleanup"):
+                st.warning("⚠️ 将删除 has_image=FALSE 或 body_text >300 字的稿件，不可恢复。")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("✅ 确认清理", key="btn_cleanup_confirm", type="primary", width="stretch"):
+                        try:
+                            n = db.cleanup_non_photo_news()
+                            st.success(f"已清理 {n} 条非图片新闻稿件")
+                            _invalidate_caches()
+                        except Exception as e:
+                            st.error(f"清理失败：{e}")
+                        st.session_state.pop("_confirm_cleanup", None)
+                        st.rerun()
+                with c2:
+                    if st.button("取消", key="btn_cleanup_cancel", width="stretch"):
+                        st.session_state.pop("_confirm_cleanup", None)
+                        st.rerun()
+            # 图片缓存管理
+            st.divider()
+            st.subheader("🗄 图片缓存管理")
+            stats = _cache_stats()
+            st.caption(f"缓存文件：{stats['count']} 个 · 总大小：{stats['total_mb']} MB · "
+                       f"最旧：{stats['oldest_days']} 天前 · 过期阈值：{_CACHE_EXPIRE_DAYS} 天 · "
+                       f"上限：{_CACHE_MAX_SIZE_MB} MB")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if st.button("🧹 清理过期缓存", key="btn_clean_expired", width="stretch"):
+                    n = _cleanup_expired_cache()
+                    _enforce_cache_size_limit()
+                    st.success(f"已清理 {n} 个过期缓存文件")
+            with cc2:
+                if st.button("🗑 清空全部缓存", key="btn_clear_all_cache", width="stretch"):
+                    st.session_state["_confirm_clear_cache"] = True
+            if st.session_state.get("_confirm_clear_cache"):
+                st.warning("⚠️ 将删除所有图片缓存文件，下次访问需重新下载。确认继续？")
+                ccc1, ccc2 = st.columns(2)
+                with ccc1:
+                    if st.button("✅ 确认清空", key="btn_clear_cache_confirm",
+                                 type="primary", width="stretch"):
+                        import shutil
+                        try:
+                            shutil.rmtree(_IMG_CACHE_DIR)
+                            os.makedirs(_IMG_CACHE_DIR, exist_ok=True)
+                            _IMG_CACHE.clear()
+                            st.success("已清空全部图片缓存")
+                        except Exception as e:
+                            st.error(f"清空失败：{e}")
+                        st.session_state.pop("_confirm_clear_cache", None)
+                with ccc2:
+                    if st.button("取消", key="btn_clear_cache_cancel", width="stretch"):
+                        st.session_state.pop("_confirm_clear_cache", None)
+                        st.rerun()
+            # 手动爬取
+            st.divider()
+            st.subheader("🔄 手动爬取")
+            if st.button("📅 立即爬取今日", key="btn_crawl_today", type="primary", width="stretch"):
+                with st.spinner("正在爬取各媒体今日稿件（约 1-3 分钟）..."):
                     try:
-                        n = db.cleanup_non_photo_news()
-                        st.success(f"已清理 {n} 条非图片新闻稿件")
-                        _invalidate_caches()
-                    except Exception as e:
-                        st.error(f"清理失败：{e}")
-                    st.session_state.pop("_confirm_cleanup", None)
-                    st.rerun()
-            with c2:
-                if st.button("取消", key="btn_cleanup_cancel", width="stretch"):
-                    st.session_state.pop("_confirm_cleanup", None)
-                    st.rerun()
-        # 图片缓存管理
-        st.divider()
-        st.subheader("🗄 图片缓存管理")
-        stats = _cache_stats()
-        st.caption(f"缓存文件：{stats['count']} 个 · 总大小：{stats['total_mb']} MB · "
-                   f"最旧：{stats['oldest_days']} 天前 · 过期阈值：{_CACHE_EXPIRE_DAYS} 天 · "
-                   f"上限：{_CACHE_MAX_SIZE_MB} MB")
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            if st.button("🧹 清理过期缓存", key="btn_clean_expired", width="stretch"):
-                n = _cleanup_expired_cache()
-                _enforce_cache_size_limit()
-                st.success(f"已清理 {n} 个过期缓存文件")
-        with cc2:
-            if st.button("🗑 清空全部缓存", key="btn_clear_all_cache", width="stretch"):
-                st.session_state["_confirm_clear_cache"] = True
-        if st.session_state.get("_confirm_clear_cache"):
-            st.warning("⚠️ 将删除所有图片缓存文件，下次访问需重新下载。确认继续？")
-            ccc1, ccc2 = st.columns(2)
-            with ccc1:
-                if st.button("✅ 确认清空", key="btn_clear_cache_confirm",
-                             type="primary", width="stretch"):
-                    import shutil
-                    try:
-                        shutil.rmtree(_IMG_CACHE_DIR)
-                        os.makedirs(_IMG_CACHE_DIR, exist_ok=True)
-                        _IMG_CACHE.clear()
-                        st.success("已清空全部图片缓存")
-                    except Exception as e:
-                        st.error(f"清空失败：{e}")
-                    st.session_state.pop("_confirm_clear_cache", None)
-            with ccc2:
-                if st.button("取消", key="btn_clear_cache_cancel", width="stretch"):
-                    st.session_state.pop("_confirm_clear_cache", None)
-                    st.rerun()
-        # 手动爬取
-        st.divider()
-        st.subheader("🔄 手动爬取")
-        if st.button("📅 立即爬取今日", key="btn_crawl_today", type="primary", width="stretch"):
-            with st.spinner("正在爬取各媒体今日稿件（约 1-3 分钟）..."):
-                try:
-                    stats = crawler.crawl_all()
-                    db.set_setting("last_crawl_date", _time.strftime("%Y-%m-%d"))
-                    _invalidate_setting_cache()
-                    _invalidate_caches()
-                    st.success(f"爬取完成：新增 {stats.get('added', 0)} 条，"
-                               f"跳过 {stats.get('skipped', 0)} 条，"
-                               f"无图过滤 {stats.get('skipped_no_image', 0)} 条")
-                except Exception as e:
-                    st.error(f"爬取失败：{e}")
-        st.caption("补爬多日：选择起止日期，重复稿件自动跳过")
-        last_crawl = _get_setting_cached("last_crawl_date")
-        try:
-            _default_start = date.fromisoformat(last_crawl) + timedelta(days=1) if last_crawl else date.today()
-        except (ValueError, TypeError):
-            _default_start = date.today()
-        _default_start = min(_default_start, date.today())
-        col_s, col_e = st.columns(2)
-        with col_s:
-            crawl_start = st.date_input("起始日期", value=_default_start, key="crawl_start")
-        with col_e:
-            crawl_end = st.date_input("结束日期", value=date.today(), key="crawl_end")
-        if st.button("🚀 开始范围爬取", key="btn_crawl_range", width="stretch"):
-            if crawl_start > crawl_end:
-                st.error("起始日期不能晚于结束日期")
-            else:
-                days = (crawl_end - crawl_start).days + 1
-                with st.spinner(f"正在爬取 {crawl_start} ~ {crawl_end}（共 {days} 天）..."):
-                    try:
-                        stats = crawler.crawl_date_range(crawl_start, crawl_end)
-                        db.set_setting("last_crawl_date", crawl_end.isoformat())
+                        stats = crawler.crawl_all()
+                        db.set_setting("last_crawl_date", _time.strftime("%Y-%m-%d"))
                         _invalidate_setting_cache()
                         _invalidate_caches()
-                        st.success(f"范围爬取完成：新增 {stats.get('added', 0)} 条，"
+                        st.success(f"爬取完成：新增 {stats.get('added', 0)} 条，"
                                    f"跳过 {stats.get('skipped', 0)} 条，"
                                    f"无图过滤 {stats.get('skipped_no_image', 0)} 条")
                     except Exception as e:
                         st.error(f"爬取失败：{e}")
-        # 退出登录
-        if config.AUTH_ENABLED and st.session_state.get("authenticated"):
-            st.divider()
-            if st.button("🚪 退出登录", key="btn_logout", width="stretch"):
-                st.session_state.pop("authenticated", None)
-                st.rerun()
+            st.caption("补爬多日：选择起止日期，重复稿件自动跳过")
+            last_crawl = _get_setting_cached("last_crawl_date")
+            try:
+                _default_start = date.fromisoformat(last_crawl) + timedelta(days=1) if last_crawl else date.today()
+            except (ValueError, TypeError):
+                _default_start = date.today()
+            _default_start = min(_default_start, date.today())
+            col_s, col_e = st.columns(2)
+            with col_s:
+                crawl_start = st.date_input("起始日期", value=_default_start, key="crawl_start")
+            with col_e:
+                crawl_end = st.date_input("结束日期", value=date.today(), key="crawl_end")
+            if st.button("🚀 开始范围爬取", key="btn_crawl_range", width="stretch"):
+                if crawl_start > crawl_end:
+                    st.error("起始日期不能晚于结束日期")
+                else:
+                    days = (crawl_end - crawl_start).days + 1
+                    with st.spinner(f"正在爬取 {crawl_start} ~ {crawl_end}（共 {days} 天）..."):
+                        try:
+                            stats = crawler.crawl_date_range(crawl_start, crawl_end)
+                            db.set_setting("last_crawl_date", crawl_end.isoformat())
+                            _invalidate_setting_cache()
+                            _invalidate_caches()
+                            st.success(f"范围爬取完成：新增 {stats.get('added', 0)} 条，"
+                                       f"跳过 {stats.get('skipped', 0)} 条，"
+                                       f"无图过滤 {stats.get('skipped_no_image', 0)} 条")
+                        except Exception as e:
+                            st.error(f"爬取失败：{e}")
+            # 退出登录
+            if config.AUTH_ENABLED and st.session_state.get("authenticated"):
+                st.divider()
+                if st.button("🚪 退出登录", key="btn_logout", width="stretch"):
+                    st.session_state.pop("authenticated", None)
+                    st.rerun()
