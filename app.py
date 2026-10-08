@@ -42,24 +42,9 @@ import crawler
 st.set_page_config(page_title="行者", layout="wide")
 
 
-def _bj_time(iso_str: str | None) -> str:
-    """把库里存的 UTC 时间转成北京时间显示（使用者在中国，看 UTC 会误判成"没保存"）。
-
-    定义在文件最前面：多个标签页都要用，而 Streamlit 是从上到下顺序执行的。
-    """
-    if not iso_str:
-        return ""
-    try:
-        return (datetime.fromisoformat(iso_str) + timedelta(hours=8)).strftime("%m-%d %H:%M:%S")
-    except Exception:  # noqa: BLE001
-        return str(iso_str)[:19].replace("T", " ")
-
-
-def _md_escape(s: str) -> str:
-    """转义 markdown 特殊字符，防止第三方内容（标题/URL）注入。"""
-    if not s:
-        return ""
-    return re.sub(r"([\\*_{}\[\]()#+.\!|>])", r"\\\1", str(s))
+# 文本小工具（北京时间显示 / Markdown 转义 / 安全链接）：
+# 2026-10-08 已拆出到 text_utils.py，多个标签页共用，这里保持再导出。
+from text_utils import _bj_time, _md_escape, _safe_anchor
 
 
 # 图片下载/缓存/失败归因：2026-10-08 已整体拆出到 image_loader.py，
@@ -91,18 +76,6 @@ from image_loader import (
 )
 
 
-def _safe_anchor(label: str, url: str) -> str:
-    """生成安全的 markdown 链接文本，仅允许 http/https 协议。
-
-    中国石油报是 SPA 数字报，单篇无独立 URL，锚点定位不生效，
-    正文已在库中，故直接返回提示文本，不展示无效链接。
-    """
-    safe_url = _normalize_display_url((url or "").strip())
-    if not safe_url.startswith(("http://", "https://")):
-        return f"{_md_escape(label)}：{_md_escape(safe_url)}"
-    if "epaper.cnpc.com.cn" in safe_url:
-        return "中国石油报数字报（无单篇链接，正文见下方）"
-    return f"[{_md_escape(label)}]({safe_url})"
 
 
 # 数据库查询缓存层：2026-10-08 已拆出到 db_cache.py，
@@ -242,416 +215,37 @@ _UPLOAD_PAGE_SIZE = 12  # 每页展示数量
 
 
 # ---------------- Tabs ----------------
-tab_review, tab_history, tab_excluded, tab_calendar, tab_material, tab_writing, tab_help = st.tabs(
-    ["✅ 今日审核", "🗂 历史已审", "🚫 已排除", "📅 常规日历", "📚 素材对标", "✍️ 撰稿中心", "❓ 使用说明"]
+tab_review, tab_history, tab_calendar, tab_material, tab_writing, tab_help = st.tabs(
+    ["✅ 今日审核", "🗂 历史已审", "📅 常规日历", "📚 素材对标", "✍️ 撰稿中心", "❓ 使用说明"]
 )
 
 
-# ----- Tab 1: 今日审核（批量 checkbox 审核 UI） -----
-def _do_review_batch(article_ids, decision):
-    """批量审核：连接断开时自动重建池并重试一次。返回 (是否成功, 影响行数)。"""
-    import psycopg2 as _pg
-    try:
-        n = db.set_review_batch(article_ids, decision)
-        return True, n
-    except (_pg.OperationalError, _pg.InterfaceError):
-        db._reset_pool()
-        try:
-            n = db.set_review_batch(article_ids, decision)
-            return True, n
-        except Exception:
-            return False, 0
-    except Exception:
-        return False, 0
-
-
-def _clear_selection(ids):
-    """清空选中状态（批量操作后调用）。"""
-    for aid in ids:
-        st.session_state.pop(f"chk_{aid}", None)
-    # 不能直接设 chk_all=False（widget 已实例化会报错），
-    # 用 pop 移除该 key，rerun 后 checkbox 会以默认值 False 重建。
-    st.session_state.pop("chk_all", None)
-
+# ----- Tab 1: 今日审核 -----
+# 2026-10-08 已拆出到 tabs/tab_review.py
+from tabs.excluded_panel import render_excluded_panel
+from tabs.tab_review import render_review
 
 with tab_review:
-    st.subheader("今日新稿（5 分钟审核法）")
-    st.caption("勾选多条 → 顶部「批量保存/删除」一次处理；保存=入资料库，删除=直接清理。")
-    rows = _fetch_unreviewed_cached(limit=30)
-    if not rows:
-        st.info("暂无待审稿件。点击下方按钮立即爬取，或确认 config.py 已填栏目 URL。")
-        if st.button("🔄 立即爬取今日稿件", type="primary"):
-            with st.spinner("正在爬取各媒体稿件（约 1-3 分钟）..."):
-                try:
-                    stats = crawler.crawl_all()
-                    db.set_setting("last_crawl_date", _time.strftime("%Y-%m-%d"))
-                    _invalidate_setting_cache()
-                    st.toast(
-                        f"完成：新增 {stats['added']} 条，跳过 {stats['skipped']} 条",
-                        icon="📰",
-                    )
-                except Exception as e:
-                    st.error(f"爬取失败：{e}")
-            _invalidate_caches()
-            st.rerun()
-    else:
-        all_ids = [r["id"] for r in rows]
+    render_review()
+    # 「已排除」原是独立标签页，现收在本页底部折叠区：
+    # 它是过滤规则的安全网——误杀了能从这里找回，功能必须留，
+    # 但不值得单独占一个主导航位置，需要时点开即可。
+    with st.expander("🚫 已排除稿件（规则拦下的，可恢复）", expanded=False):
+        render_excluded_panel()
 
-        # 全选 on_change 回调：同步所有 chk_{id} session_state
-        def _toggle_all(*_):
-            v = st.session_state.get("chk_all", False)
-            for aid in all_ids:
-                st.session_state[f"chk_{aid}"] = v
+# ----- Tab 2: 历史已审 ----
+# 2026-10-08 已拆出到 tabs/tab_history.py
+from tabs.tab_history import render_history
 
-        # 顶部工具栏：全选 + 批量按钮
-        sel_cols = st.columns([1, 3])
-        with sel_cols[0]:
-            st.checkbox("全选", key="chk_all", on_change=_toggle_all)
-        # 实时统计选中数（从 session_state 读，全选 on_change 已同步过）
-        selected_ids = [aid for aid in all_ids if st.session_state.get(f"chk_{aid}", False)]
-        n_sel = len(selected_ids)
-        with sel_cols[1]:
-            st.caption(f"已选 {n_sel} / {len(all_ids)} 条")
-        # 批量按钮单独一行，确保小屏也能完整显示
-        btn_cols = st.columns([1, 1, 4])
-        with btn_cols[0]:
-            if st.button(f"💾 批量保存({n_sel})", key="btn_batch_save",
-                         type="primary", disabled=(n_sel == 0), width="stretch"):
-                ok, n = _do_review_batch(selected_ids, "保存")
-                if ok:
-                    st.session_state["_force_vec_sync"] = True
-                    st.toast(f"已批量保存 {n} 条", icon="📁")
-                    _clear_selection(selected_ids)
-                    _invalidate_caches()
-                else:
-                    st.error("连接失败，请重试")
-                st.rerun()
-        with btn_cols[1]:
-            if st.button(f"🗑 批量删除({n_sel})", key="btn_batch_del",
-                         disabled=(n_sel == 0), width="stretch"):
-                st.session_state["_pending_del_ids"] = list(selected_ids)
-                st.rerun()
-
-        # 删除二次确认
-        if st.session_state.get("_pending_del_ids"):
-            pending = st.session_state["_pending_del_ids"]
-            st.warning(f"⚠️ 确认删除 {len(pending)} 条？删除不可恢复。")
-            conf_cols = st.columns([1, 1, 4])
-            with conf_cols[0]:
-                if st.button("✅ 确认删除", key="btn_confirm_del", type="primary", width="stretch"):
-                    ok, n = _do_review_batch(pending, "删除")
-                    if ok:
-                        st.toast(f"已批量删除 {n} 条", icon="🗑")
-                        _clear_selection(pending)
-                        _invalidate_caches()
-                    else:
-                        st.error("连接失败，请重试")
-                    st.session_state.pop("_pending_del_ids", None)
-                    st.rerun()
-            with conf_cols[1]:
-                if st.button("取消", key="btn_cancel_del", width="stretch"):
-                    st.session_state.pop("_pending_del_ids", None)
-                    st.rerun()
-
-        # 并发预加载所有稿件图片（避免串行下载拖慢首屏）
-        all_img_urls = []
-        for r in rows:
-            raw = r.get("image_urls")
-            if raw:
-                try:
-                    urls = json.loads(raw) if isinstance(raw, str) else raw
-                    all_img_urls.extend(urls[:5])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        _preload_images(all_img_urls)
-
-        # 渲染每条稿件
-        for r in rows:
-            with st.container(border=True):
-                cols = st.columns([0.4, 9.6])
-                with cols[0]:
-                    st.checkbox("选", key=f"chk_{r['id']}")
-                with cols[1]:
-                    st.markdown(f"**{_md_escape(r['title'])}**")
-                    st.caption(
-                        f"{r['source_name']} · {r['column_name']} · "
-                        f"{r['publish_date'] or '日期不详'} · 作者: {r['author'] or '不详'}"
-                    )
-                    if r.get("ai_pending"):
-                        st.warning(
-                            "⚠️ 待确认：AI 判定时接口故障，未归入 5 类题材，"
-                            "请人工判断后再保存或删除。",
-                            icon="⚠️",
-                        )
-                    with st.expander("摘要 / 详情"):
-                        # 展示图片（image_urls 是 JSON 字符串数组）
-                        img_urls_raw = r.get("image_urls")
-                        if img_urls_raw:
-                            try:
-                                img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
-                                if img_urls:
-                                    for u in img_urls[:5]:
-                                        _render_image(u)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        st.write(r["summary"] or "（无摘要）")
-                        if r["body_text"]:
-                            st.text_area("正文预览（前 500 字）",
-                                         r["body_text"][:500], height=160,
-                                         disabled=True, key=f"body_{r['id']}")
-                        st.markdown(_safe_anchor("原文链接", r['url']))
-                        # 单条操作按钮
-                        act_cols = st.columns([1, 1, 4])
-                        with act_cols[0]:
-                            if st.button("💾 保存", key=f"save_{r['id']}",
-                                         type="primary", width="stretch"):
-                                try:
-                                    db.set_review(r["id"], "保存")
-                                    st.session_state["_force_vec_sync"] = True
-                                    _invalidate_caches()
-                                    st.toast("已保存", icon="📁")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"保存失败：{e}")
-                        with act_cols[1]:
-                            if st.button("🗑 删除", key=f"del_{r['id']}",
-                                         width="stretch"):
-                                st.session_state["_pending_del_single"] = r["id"]
-                                st.rerun()
-            # 单条删除二次确认
-            if st.session_state.get("_pending_del_single") == r["id"]:
-                st.warning(f"⚠️ 确认删除「{r['title'][:30]}…」？删除不可恢复。")
-                conf = st.columns([1, 1, 8])
-                with conf[0]:
-                    if st.button("✅ 确认删", key=f"cfm_del_{r['id']}",
-                                 type="primary", width="stretch"):
-                        try:
-                            db.set_review(r["id"], "删除")
-                            _invalidate_caches()
-                            st.toast("已删除", icon="🗑")
-                        except Exception as e:
-                            st.error(f"删除失败：{e}")
-                        st.session_state.pop("_pending_del_single", None)
-                        st.rerun()
-                with conf[1]:
-                    if st.button("取消", key=f"cancel_del_{r['id']}", width="stretch"):
-                        st.session_state.pop("_pending_del_single", None)
-                        st.rerun()
-
-
-# ----- Tab 2: 历史已审 -----
 with tab_history:
-    st.subheader("已审稿件")
-    rows = _fetch_reviewed_cached(limit=200)
-    if not rows:
-        st.info("还没有审核记录。去「今日审核」审几篇试试。")
-    else:
-        # 并发预加载所有稿件图片
-        all_img_urls = []
-        for r in rows:
-            raw = r.get("image_urls")
-            if raw:
-                try:
-                    urls = json.loads(raw) if isinstance(raw, str) else raw
-                    all_img_urls.extend(urls[:5])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        _preload_images(all_img_urls)
+    render_history()
 
-        for r in rows:
-            tag = {"保存": "📁 保存"}.get(r["decision"], r["decision"])
-            with st.expander(f"{tag} | {r['title']} | {r['source_name']}/{r['column_name']}"):
-                if r.get("publish_date"):
-                    st.caption(f"发布日期：{r['publish_date']}  |  审核时间：{r['reviewed_at']}")
-                st.markdown(_safe_anchor("原文链接", r['url']))
-                # 展示图片（image_urls 是 JSON 字符串数组）
-                img_urls_raw = r.get("image_urls")
-                if img_urls_raw:
-                    try:
-                        img_urls = json.loads(img_urls_raw) if isinstance(img_urls_raw, str) else img_urls_raw
-                        if img_urls:
-                            for u in img_urls[:5]:
-                                _render_image(u)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                if r.get("body_text"):
-                    st.markdown(_md_escape(r["body_text"]))
-                else:
-                    st.info("（无正文内容）")
-                # 删除按钮（从已审库中移除）
-                if st.button("🗑 删除此稿件", key=f"hist_del_{r['id']}", width="stretch"):
-                    st.session_state["_pending_hist_del"] = r["id"]
-                    st.rerun()
-            # 历史删除二次确认
-            if st.session_state.get("_pending_hist_del") == r["id"]:
-                st.warning(f"⚠️ 确认从资料库删除「{r['title'][:30]}…」？删除不可恢复。")
-                hconf = st.columns([1, 1, 8])
-                with hconf[0]:
-                    if st.button("✅ 确认删", key=f"hist_cfm_{r['id']}",
-                                 type="primary", width="stretch"):
-                        try:
-                            db.set_review(r["id"], "删除")
-                            _invalidate_caches()
-                            st.toast("已从资料库删除", icon="🗑")
-                        except Exception as e:
-                            st.error(f"删除失败：{e}")
-                        st.session_state.pop("_pending_hist_del", None)
-                        st.rerun()
-                with hconf[1]:
-                    if st.button("取消", key=f"hist_cancel_{r['id']}", width="stretch"):
-                        st.session_state.pop("_pending_hist_del", None)
-                        st.rerun()
+# ----- Tab 4: 常规日历 + 投稿记录 ----
+# 2026-10-08 已拆出到 tabs/tab_calendar.py
+from tabs.tab_calendar import render_calendar
 
-
-# ----- Tab 3: 已排除（过滤留痕，可恢复） -----
-with tab_excluded:
-    st.subheader("已排除稿件")
-    st.caption(
-        "抓取时被规则拦下的稿件都记在这里，每一条都写明「为什么被拦」。"
-        "规则要是误杀了，点「↩️ 恢复」它就回到「今日审核」重新走流程。"
-    )
-    _EX_LABEL = {
-        "topic_blacklist": "🚫 题材黑名单",
-        "not_photo_news": "📄 不是图片新闻",
-        "not_in_5cats": "🧭 不在 5 类题材",
-        "comic": "🎨 疑似漫画/插画",
-        "ai_failed": "🤖 AI 判定失败",
-    }
-    try:
-        ex_rows = _list_excluded_cached(60)
-        ex_stats = db.excluded_stats()
-    except Exception as e:
-        st.error(f"读取已排除列表失败：{e}")
-        ex_rows, ex_stats = [], {}
-    if not ex_rows:
-        st.info("暂无被排除的稿件。下一次抓取后，被规则拦下的稿件会出现在这里。")
-    else:
-        if ex_stats:
-            st.caption(
-                "原因分布："
-                + " ｜ ".join(f"{_EX_LABEL.get(k, k)} {v} 条" for k, v in ex_stats.items())
-            )
-        codes = sorted({r["reason_code"] for r in ex_rows})
-        pick = st.selectbox(
-            "按原因筛选", ["全部"] + [_EX_LABEL.get(c, c) for c in codes],
-            key="ex_filter",
-        )
-        if pick != "全部":
-            _want = next(c for c in codes if _EX_LABEL.get(c, c) == pick)
-            ex_rows = [r for r in ex_rows if r["reason_code"] == _want]
-        show_img = st.checkbox("显示图片（加载会慢一些）", key="ex_show_img")
-        for r in ex_rows[:60]:
-            label = _EX_LABEL.get(r["reason_code"], r["reason_code"])
-            with st.expander(f"{label} | {r['title']} | {r['source_name']}/{r['column_name']}"):
-                st.caption(f"排除原因：{r['reason'] or '（未记录）'}")
-                st.caption(f"抓取时间：{_bj_time(r.get('crawled_at'))}")
-                if r.get("body_snippet"):
-                    st.markdown(_md_escape(r["body_snippet"][:300]))
-                if show_img and r.get("image_urls"):
-                    try:
-                        _us = json.loads(r["image_urls"])
-                        for u in _us[:2]:
-                            _render_image(u)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("↩️ 恢复入库", key=f"ex_restore_{r['id']}", width="stretch"):
-                        try:
-                            new_id = db.restore_excluded(r["id"])
-                            if new_id:
-                                _invalidate_caches()
-                                st.toast("已恢复到「今日审核」", icon="↩️")
-                            else:
-                                st.warning(
-                                    "恢复失败：栏目「"
-                                    f"{r['source_name']}/{r['column_name']}"
-                                    "」在库里找不到了（config 改过栏目名？），"
-                                    "或者这篇已经入库过。"
-                                )
-                        except Exception as e:
-                            st.error(f"恢复失败：{e}")
-                        st.rerun()
-                with b2:
-                    if st.button("🗑 删除记录", key=f"ex_del_{r['id']}", width="stretch"):
-                        st.session_state["_pending_ex_del"] = r["id"]
-                        st.rerun()
-            if st.session_state.get("_pending_ex_del") == r["id"]:
-                st.warning(f"⚠️ 确认删除「{r['title'][:30]}…」的排除记录？删除后不再可恢复。")
-                ec = st.columns([1, 1, 8])
-                with ec[0]:
-                    if st.button("✅ 确认删", key=f"ex_cfm_{r['id']}",
-                                 type="primary", width="stretch"):
-                        try:
-                            db.delete_excluded(r["id"])
-                            _list_excluded_cached.clear()
-                            st.toast("已删除该排除记录", icon="🗑")
-                        except Exception as e:
-                            st.error(f"删除失败：{e}")
-                        st.session_state.pop("_pending_ex_del", None)
-                        st.rerun()
-                with ec[1]:
-                    if st.button("取消", key=f"ex_cancel_{r['id']}", width="stretch"):
-                        st.session_state.pop("_pending_ex_del", None)
-                        st.rerun()
-
-
-# ----- Tab 4: 常规日历 + 投稿记录 -----
 with tab_calendar:
-    st.subheader("未来两周常规选题预警")
-    try:
-        upcoming = calendar_engine.upcoming_topics(horizon_days=14)
-    except Exception as _e:
-        upcoming = []
-        st.warning(f"日历加载失败：{_e}")
-    if not upcoming:
-        st.info("未来两周没有触发常规选题。可在 config.py 的 ROUTINE_TOPICS_SEED 中追加。")
-    else:
-        for t in upcoming:
-            st.markdown(
-                f"**{t['topic']}** "
-                f"`{t['status']}` 推荐版面：{t['recommended_column']} "
-                f"(提前 {t['lead_days']} 天)"
-            )
-            st.caption(t["note"])
-
-    st.divider()
-    st.subheader("用稿规律（命中率）")
-    try:
-        hit = calendar_engine.hit_rate_by_column()
-    except Exception as _e:
-        hit = []
-        st.warning(f"命中率统计加载失败：{_e}")
-    if hit:
-        st.dataframe(hit, width="stretch", hide_index=True)
-    else:
-        st.info("还没有投稿记录。下面录一条试试。")
-
-    st.divider()
-    st.subheader("📝 新增投稿记录")
-    with st.form("add_sub", clear_on_submit=True):
-        cs = st.columns([2, 2, 2, 2])
-        topic = cs[0].text_input("选题")
-        media = cs[1].selectbox("目标媒体", ["中国石油报", "辽宁日报", "企业内网"])
-        col = cs[2].text_input("目标版面")
-        result = cs[3].selectbox("结果", ["待审", "录用", "退稿"])
-        note = st.text_input("备注")
-        if st.form_submit_button("保存投稿记录") and topic:
-            try:
-                with db.get_conn() as c:
-                    cur = db.conn_cursor(c)
-                    cur.execute(
-                        "INSERT INTO submission"
-                        "(topic, target_media, target_column, submitted_at, "
-                        "result, note) VALUES (%s,%s,%s,%s,%s,%s)",
-                        (topic, media, col or None, db.now_iso(), result, note or None),
-                    )
-                st.success("已保存")
-                _invalidate_caches()
-                st.rerun()
-            except Exception as e:
-                st.error(f"保存失败：{e}")
-
+    render_calendar()
 
 # ----- Tab 4: 素材对标（选题对标 + 图文素材）-----
 with tab_material:

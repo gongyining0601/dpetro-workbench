@@ -344,11 +344,26 @@ def _img_to_data_uri(url: str) -> str:
 
 
 def _render_image(url: str):
-    """渲染单张远程图片：服务端下载转 base64，绕过 https 混合内容拦截。"""
+    """渲染单张远程图片：服务端下载转 base64，绕过 https 混合内容拦截。
+
+    2026-10-08 修正显示方式（解决"中国石油报图片糊/变形"）：
+    原来用 st.image(width="stretch")，会把每张图硬拉到容器宽度（约 650px）。
+    低分辨率的图被放大后惨不忍睹——实测中国石油报的版面裁图最小只有 248×109，
+    拉满容器等于放大 2.6 倍，看着就像"压缩过度"。
+    现在改成按原始尺寸居中显示，只有宽过容器时才等比缩小：
+    小图不放大所以清晰，大图不溢出，宽高比全程保持，不存在变形。
+    """
     u = _normalize_display_url(url)
     data_uri = _img_to_data_uri(u)
     if data_uri:
-        st.image(data_uri, width="stretch")
+        # height:auto          等比缩放，宽高比绝不失真
+        # max-width:100%       大图收进容器内，不撑破布局
+        # display+margin       宽度不足容器的小图居中摆放，不贴左边
+        st.markdown(
+            f'<img src="{data_uri}" alt="" '
+            f'style="max-width:100%;height:auto;display:block;margin:0 auto;" />',
+            unsafe_allow_html=True,
+        )
         return
     reason = _IMG_FAIL_REASON.get(u, "")
     _REASON_TEXT = {
