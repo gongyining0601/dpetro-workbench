@@ -105,75 +105,21 @@ def _safe_anchor(label: str, url: str) -> str:
     return f"[{_md_escape(label)}]({safe_url})"
 
 
-# ==================== 性能优化：缓存包装 ====================
-# 2026-10-03 新增：用 Streamlit 缓存减少重复数据库查询
-# - init_db: 整个会话只执行一次（建表是幂等的）
-# - 读查询: ttl 缓存，写操作后手动清空
-@st.cache_resource
-def _init_db_cached():
-    db.init_db()
-
-
-@st.cache_data(ttl=30)
-def _stats_overview_cached():
-    return db.stats_overview()
-
-
-# 配置项（如"上次爬取日期"）原来每次交互都要查两次库，跨境往返各约 0.4 秒，
-# 而它一天才变一次 —— 缓存住，写的时候清。
-@st.cache_data(ttl=300)
-def _get_setting_cached(key: str, _v: int = 0):
-    return db.get_setting(key)
-
-
-# 草稿列表：原来每次点击都会查一次库（即使抽屉没打开，Streamlit 也会渲染里面的内容）。
-# 缓存 + 写操作后清空，既省掉往返，又保证"存完立刻能看到"。
-@st.cache_data(ttl=120)
-def _list_drafts_cached(limit: int = 30, _v: int = 0):
-    return [dict(d) for d in db.list_drafts(limit=limit)]
-
-
-# 这些列表一天才被爬虫更新一次；每次交互都回源查库（跨境约 0.5 秒/次）纯属浪费。
-# 放长缓存，写操作后由 _invalidate_caches() 主动清空，保证改完立刻能看到。
-@st.cache_data(ttl=30)
-def _fetch_unreviewed_cached(limit=30):
-    return db.fetch_unreviewed(limit=limit)
-
-
-@st.cache_data(ttl=60)
-def _fetch_reviewed_cached(limit=200):
-    return db.fetch_reviewed(limit=limit)
-
-
-@st.cache_data(ttl=60)
-def _fetch_image_articles_cached(limit=200):
-    return db.fetch_image_articles(limit)
-
-
-# 已排除列表：爬虫写、页面读，一天才变一次，同样走缓存 + 写后失效
-@st.cache_data(ttl=60)
-def _list_excluded_cached(limit: int = 60, _v: int = 0):
-    return [dict(r) for r in db.list_excluded(limit=limit)]
-
-
-def _invalidate_caches():
-    """审核/删除/投稿等写操作后调用，清空所有数据缓存，确保列表立即刷新。"""
-    _stats_overview_cached.clear()
-    _fetch_unreviewed_cached.clear()
-    _fetch_reviewed_cached.clear()
-    _fetch_image_articles_cached.clear()
-    _list_excluded_cached.clear()
-
-
-def _invalidate_draft_cache():
-    """草稿发生增删改后调用：列表缓存失效，下一轮重新读库（保证存完立刻可见）。"""
-    _list_drafts_cached.clear()
-
-
-def _invalidate_setting_cache():
-    """配置项（如 last_crawl_date）被改写后调用。"""
-    _get_setting_cached.clear()
-
+# 数据库查询缓存层：2026-10-08 已拆出到 db_cache.py，
+# 下面保持符号再导出，调用点不用改。
+from db_cache import (
+    _fetch_image_articles_cached,
+    _fetch_reviewed_cached,
+    _fetch_unreviewed_cached,
+    _get_setting_cached,
+    _init_db_cached,
+    _invalidate_caches,
+    _invalidate_draft_cache,
+    _invalidate_setting_cache,
+    _list_drafts_cached,
+    _list_excluded_cached,
+    _stats_overview_cached,
+)
 
 st.title("🧭 行者")
 
@@ -219,70 +165,11 @@ if not _db_ok:
 
 
 # ---------------- 访问密码登录门控 ----------------
-# AUTH_ENABLED=False 时跳过登录（本地调试用）
-if config.AUTH_ENABLED:
-    _authed = st.session_state.get("authenticated", False)
+# 2026-10-08 已拆出到 auth_ui.py（首次设密码 / 登录校验 / 失败限流）。
+# 未通过校验时，require_auth() 内部会 st.stop()，不会走到下面的主界面。
+from auth_ui import require_auth
 
-    if not _authed:
-        _has_pw = auth.has_access_password()
-
-        if not _has_pw:
-            # 首次使用：设置访问密码
-            st.info("🔐 首次使用，请设置访问密码（整个应用只有一个密码，务必牢记）。")
-            with st.form("set_password_form", clear_on_submit=True):
-                _pw1 = st.text_input("设置访问密码", type="password", placeholder="至少 8 位")
-                _pw2 = st.text_input("确认密码", type="password")
-                _set_submitted = st.form_submit_button("✅ 设置密码", type="primary")
-            if _set_submitted:
-                if not _pw1:
-                    st.error("密码不能为空")
-                elif _pw1 != _pw2:
-                    st.error("两次输入的密码不一致")
-                else:
-                    try:
-                        auth.set_access_password(_pw1)
-                        st.session_state["authenticated"] = True
-                        st.success("密码设置成功，已自动登录")
-                        st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
-            st.stop()
-
-        else:
-            # 已有密码：登录（带失败限流：5 次失败后锁定 5 分钟）
-            _max_failures = 5
-            _lock_seconds = 300  # 5 分钟
-            _fail_count = st.session_state.get("_login_fail_count", 0)
-            _lock_until = st.session_state.get("_login_lock_until", 0)
-            _now = time.time()
-
-            if _now < _lock_until:
-                _remaining = int(_lock_until - _now)
-                st.error(f"🔒 登录失败次数过多，已锁定 {_remaining} 秒后重试")
-                st.stop()
-
-            with st.form("login_form", clear_on_submit=True):
-                _pw = st.text_input("🔐 请输入访问密码", type="password")
-                _login_submitted = st.form_submit_button("登录", type="primary")
-            if _login_submitted:
-                if auth.verify_access_password(_pw):
-                    st.session_state["authenticated"] = True
-                    st.session_state["_login_fail_count"] = 0
-                    st.session_state["_login_lock_until"] = 0
-                    st.rerun()
-                else:
-                    _fail_count += 1
-                    st.session_state["_login_fail_count"] = _fail_count
-                    if _fail_count >= _max_failures:
-                        st.session_state["_login_lock_until"] = _now + _lock_seconds
-                        st.error(f"密码错误，已连续失败 {_fail_count} 次，锁定 {_lock_seconds // 60} 分钟")
-                    else:
-                        st.error(f"密码错误，还剩 {_max_failures - _fail_count} 次尝试机会")
-            st.caption("提示：忘记密码需联系管理员重置（清空 app_setting 表中 access_password 记录）。")
-            st.stop()
-# ---------------- 登录门控结束 ----------------
-
-
+require_auth()
 import time as _time
 import threading as _threading
 
