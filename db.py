@@ -16,8 +16,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
+import functools
 import hashlib
 import json
+import time
 
 import psycopg2
 import psycopg2.extras
@@ -213,6 +215,75 @@ def _reset_pool():
     _pool = None
 
 
+# ---------- 跨境连接抖动自动重试 ----------
+# Supabase 走的是跨境线路，实测会出现阶段性连接失败（SSL EOF / 连接重置 / 超时）。
+# 这类错误是"瞬时"的，隔一会儿重试就能成功；而 SQL 语法错、唯一约束冲突等是
+# "确定性"错误，重试一万次也一样，必须原样抛出，让调用方看到真实原因。
+_TRANSIENT_EXC = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
+# 重试参数：读操作可多试几次；写操作保守一点，避免"已执行成功但回执丢失"时重复写入
+_RETRY_READ = 3
+_RETRY_WRITE = 2
+_BASE_DELAY = 0.4  # 秒，指数退避：0.4s → 0.8s → 1.6s
+
+
+class DbConnectionError(RuntimeError):
+    """数据库连接失败（已重试耗尽）。message 是给用户看的中文说明。"""
+
+
+def db_retry(*, write: bool = False):
+    """DAO 函数重试装饰器。
+
+    用法：
+        @db_retry()                # 读操作，默认重试 3 次
+        def fetch_xxx(...): ...
+
+        @db_retry(write=True)      # 写操作，重试 2 次
+        def save_xxx(...): ...
+
+    行为：
+    - 只捕获连接类瞬时异常（OperationalError / InterfaceError），其它异常原样抛出
+    - 每次重试前销毁并重建连接池（抖动后池里的连接往往已经全部失效）
+    - 退避等待后重试，耗尽仍失败则抛出 DbConnectionError（带中文提示）
+    """
+    max_tries = _RETRY_WRITE if write else _RETRY_READ
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(max_tries):
+                try:
+                    return fn(*args, **kwargs)
+                except _TRANSIENT_EXC as e:
+                    last_exc = e
+                    if attempt >= max_tries - 1:
+                        break
+                    wait = _BASE_DELAY * (2 ** attempt)
+                    try:
+                        _reset_pool()
+                    except Exception:
+                        pass
+                    try:
+                        config.logger.warning(
+                            f"数据库连接抖动（第 {attempt + 1}/{max_tries} 次），"
+                            f"{wait:.1f}s 后重试：{type(e).__name__}: {e}"
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(wait)
+            raise DbConnectionError(
+                "数据库连接不上（已自动重试 "
+                f"{max_tries} 次）。通常是 Supabase 跨境线路临时抖动，"
+                "请稍等十几秒再点一次；如果一直不行，检查 Settings → Secrets 里的 "
+                f"DATABASE_URL 是否正确。原始错误：{type(last_exc).__name__}: {last_exc}"
+            ) from last_exc
+
+        return wrapper
+
+    return decorator
+
+
 @contextmanager
 def get_conn():
     """从连接池获取连接；自动提交/回滚，用完归还池。
@@ -272,6 +343,7 @@ def conn_cursor(conn):
     return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 
+@db_retry(write=True)
 def init_db() -> None:
     """首次启动建表 + 灌入媒体源/栏目/常规选题种子。幂等可重复跑。"""
     config.ensure_dirs()
@@ -320,6 +392,7 @@ def init_db() -> None:
 
 # ---------- DAO: article ----------
 
+@db_retry(write=True)
 def upsert_article(column_id: int, *, title: str, url: str, author: str | None,
                    publish_date: str | None, summary: str | None,
                    body_text: str | None, content_hash: str | None,
@@ -344,6 +417,7 @@ def upsert_article(column_id: int, *, title: str, url: str, author: str | None,
         return cur.rowcount > 0
 
 
+@db_retry()
 def fetch_unreviewed(limit: int = 50):
     with get_conn() as c:
         cur = conn_cursor(c)
@@ -362,6 +436,7 @@ def fetch_unreviewed(limit: int = 50):
 
 
 
+@db_retry()
 def fetch_image_articles(limit: int = 200):
     """图文素材库（有图片的稿件，不限行业）。"""
     with get_conn() as c:
@@ -376,6 +451,7 @@ def fetch_image_articles(limit: int = 200):
             "WHERE a.has_image = TRUE ORDER BY a.crawled_at DESC LIMIT %s", (limit,)
         )
         return cur.fetchall()
+@db_retry()
 def fetch_reviewed(limit: int = 100):
     with get_conn() as c:
         cur = conn_cursor(c)
@@ -392,6 +468,7 @@ def fetch_reviewed(limit: int = 100):
         return cur.fetchall()
 
 
+@db_retry(write=True)
 def set_review(article_id: int, decision: str, note: str = "") -> None:
     """审核决策二元化：保存 / 删除。
 
@@ -416,6 +493,7 @@ def set_review(article_id: int, decision: str, note: str = "") -> None:
             cur.execute("DELETE FROM article WHERE id=%s", (article_id,))
 
 
+@db_retry(write=True)
 def set_review_batch(article_ids: list[int], decision: str, note: str = "") -> int:
     """批量审核：一次 SQL 处理多条，避免单条往返。
 
@@ -447,6 +525,7 @@ def set_review_batch(article_ids: list[int], decision: str, note: str = "") -> i
 
 # ---------- DAO: column / source ----------
 
+@db_retry()
 def get_column_id(source_name: str, column_name: str) -> int | None:
     with get_conn() as c:
         cur = conn_cursor(c)
@@ -460,6 +539,7 @@ def get_column_id(source_name: str, column_name: str) -> int | None:
         return row["id"] if row else None
 
 
+@db_retry()
 def list_columns_with_urls():
     """返回已配置 URL 的栏目（待爬）。"""
     with get_conn() as c:
@@ -475,6 +555,7 @@ def list_columns_with_urls():
         return cur.fetchall()
 
 
+@db_retry()
 def stats_overview():
     """合并为单条 SQL：6 个子查询一次网络往返返回全部指标。"""
     with get_conn() as c:
@@ -501,6 +582,7 @@ def stats_overview():
 
 # ---------- DAO: app_setting (key-value) ----------
 
+@db_retry()
 def get_setting(key: str) -> str | None:
     """读取应用配置值；不存在返回 None。"""
     with get_conn() as c:
@@ -510,6 +592,7 @@ def get_setting(key: str) -> str | None:
         return row["value"] if row else None
 
 
+@db_retry(write=True)
 def set_setting(key: str, value: str) -> None:
     """写入应用配置（UPSERT）。"""
     with get_conn() as c:
@@ -527,6 +610,7 @@ if __name__ == "__main__":
     print("DB 初始化完成（Supabase PostgreSQL）")
 
 
+@db_retry(write=True)
 def cleanup_old_unreviewed(days: int = 90) -> int:
     """清理超过指定天数的未审核稿件，防止数据库无限增长。
 
@@ -560,6 +644,7 @@ def cleanup_old_unreviewed(days: int = 90) -> int:
     return deleted
 
 
+@db_retry(write=True)
 def cleanup_non_photo_news() -> int:
     """一次性清理历史"非严格图片新闻"或元数据错误的稿件。
 
@@ -591,6 +676,7 @@ def cleanup_non_photo_news() -> int:
 # 背景：撰稿中心此前只把稿件放在 st.session_state（浏览器内存），
 # 刷新/关闭/换设备即丢失，且无历史可查。此处落到数据库，支持自动保存与回溯。
 
+@db_retry(write=True)
 def save_draft(*, title: str, body: str, topic: str = "", angle: str = "",
                target_media: str = "", draft_id: int | None = None,
                status: str = "draft") -> int | None:
@@ -623,6 +709,7 @@ def save_draft(*, title: str, body: str, topic: str = "", angle: str = "",
         return None
 
 
+@db_retry()
 def list_drafts(limit: int = 50) -> list:
     """草稿列表，最近修改的在前。"""
     with get_conn() as c:
@@ -635,6 +722,7 @@ def list_drafts(limit: int = 50) -> list:
         return cur.fetchall()
 
 
+@db_retry()
 def get_draft(draft_id: int):
     """读取单条草稿，不存在返回 None。"""
     with get_conn() as c:
@@ -646,6 +734,7 @@ def get_draft(draft_id: int):
         return cur.fetchone()
 
 
+@db_retry(write=True)
 def delete_draft(draft_id: int) -> bool:
     """删除草稿。"""
     with get_conn() as c:
@@ -658,6 +747,7 @@ def delete_draft(draft_id: int) -> bool:
 # 目的：过滤不再"静默丢弃"。被排除的稿件登记造册、写清原因，
 # 使用者随时能看、能恢复，规则误杀时不会永久丢稿。
 
+@db_retry(write=True)
 def save_excluded(*, url: str, title: str = "", source_name: str = "",
                   column_name: str = "", reason_code: str = "", reason: str = "",
                   publish_date: str | None = None, body_snippet: str = "",
@@ -688,6 +778,7 @@ def save_excluded(*, url: str, title: str = "", source_name: str = "",
         return False
 
 
+@db_retry()
 def list_excluded(limit: int = 100, reason_code: str | None = None) -> list:
     """已排除稿件列表，最近抓取的在前。"""
     with get_conn() as c:
@@ -708,6 +799,7 @@ def list_excluded(limit: int = 100, reason_code: str | None = None) -> list:
         return cur.fetchall()
 
 
+@db_retry()
 def excluded_stats() -> dict:
     """按原因统计已排除条数（一次往返）。"""
     with get_conn() as c:
@@ -718,6 +810,7 @@ def excluded_stats() -> dict:
         return {r["reason_code"]: r["n"] for r in cur.fetchall()}
 
 
+@db_retry()
 def get_excluded(ex_id: int):
     """读取单条已排除记录。"""
     with get_conn() as c:
@@ -726,6 +819,7 @@ def get_excluded(ex_id: int):
         return cur.fetchone()
 
 
+@db_retry(write=True)
 def delete_excluded(ex_id: int) -> bool:
     """彻底删除一条已排除记录（确认不要了）。"""
     with get_conn() as c:
@@ -734,6 +828,7 @@ def delete_excluded(ex_id: int) -> bool:
         return cur.rowcount > 0
 
 
+@db_retry(write=True)
 def restore_excluded(ex_id: int) -> int | None:
     """把已排除的稿件恢复成待审稿件，返回新 article id；失败返回 None。
 
@@ -780,6 +875,7 @@ def restore_excluded(ex_id: int) -> int | None:
 
 # ---------------- 图片归档（image_asset 表） ----------------
 
+@db_retry(write=True)
 def save_image_asset(*, orig_url: str, source_name: str, mime: str, data: bytes,
                      width: int = 0, height: int = 0,
                      orig_bytes: int = 0) -> bool:
@@ -804,6 +900,7 @@ def save_image_asset(*, orig_url: str, source_name: str, mime: str, data: bytes,
         return False
 
 
+@db_retry()
 def get_image_asset(orig_url: str):
     """读取归档图片（返回 row 或 None）。row['data'] 是 bytes。"""
     if not orig_url:
@@ -820,6 +917,7 @@ def get_image_asset(orig_url: str):
         return None
 
 
+@db_retry()
 def image_asset_stats() -> dict:
     """归档图片统计：张数 + 占用体积（用于侧栏展示）。"""
     with get_conn() as c:

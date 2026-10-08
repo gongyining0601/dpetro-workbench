@@ -19,6 +19,10 @@ data/
 logs/
 *.log
 
+# 数据备份（含用户真实稿件数据，绝不能提交）
+backups/
+*.tar.gz
+
 # Streamlit 运行时
 .streamlit/secrets.toml
 

@@ -541,7 +541,14 @@ for _attempt in range(2):  # 自动重试1次（连接池可能刚重建）
         _db_err = e
         db._reset_pool()  # 连接可能失效，重建池后重试
 if not _db_ok:
-    st.error(f"DB 初始化失败（{type(_db_err).__name__}: {_db_err}）。点击下方按钮重试。")
+    # DbConnectionError 的 message 本身已经是给终端用户看的中文说明，
+    # 直接展示即可；其它异常才需要补上类型名方便排障。
+    if isinstance(_db_err, db.DbConnectionError):
+        _tip = str(_db_err)
+    else:
+        _tip = f"{type(_db_err).__name__}: {_db_err}"
+    st.error(f"⚠️ {_tip}")
+    st.caption("别慌，你的数据都还在。多数情况下等十几秒再点一次就好了。")
     if st.button("🔄 重试连接", type="primary"):
         st.rerun()
     st.stop()
