@@ -17,81 +17,22 @@
 """
 from __future__ import annotations
 
-import json
-import os
-import re
-import time
-import base64
-import hashlib
-from datetime import date, datetime, timedelta
-from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import requests
 import streamlit as st
 
 import config
 import db
-import auth
-import calendar_engine
-import topic_matcher
-import draft_checker
-import ai_writer
 import crawler
+import topic_matcher
 
 st.set_page_config(page_title="行者", layout="wide")
 
 
-# 文本小工具（北京时间显示 / Markdown 转义 / 安全链接）：
-# 2026-10-08 已拆出到 text_utils.py，多个标签页共用，这里保持再导出。
-from text_utils import _bj_time, _md_escape, _safe_anchor
-
-
-# 图片下载/缓存/失败归因：2026-10-08 已整体拆出到 image_loader.py，
-# 这里只做符号再导出，调用点保持原样不用改。
-from image_loader import (
-    _archived_data_uri,
-    _cache_stats,
-    _cleanup_expired_cache,
-    _disk_cache_key,
-    _disk_cache_path,
-    _enforce_cache_size_limit,
-    _img_to_data_uri,
-    _is_image_bytes,
-    _last_cache_cleanup,
-    _load_disk_cache,
-    _normalize_display_url,
-    _preload_images,
-    _render_image,
-    _save_disk_cache,
-    _CACHE_CLEANUP_INTERVAL_SEC,
-    _CACHE_EXPIRE_DAYS,
-    _CACHE_MAX_SIZE_MB,
-    _FAIL_RETRY_SECONDS,
-    _IMG_CACHE,
-    _IMG_CACHE_DIR,
-    _IMG_FAIL_REASON,
-    _MAX_IMG_BYTES,
-    _last_cache_cleanup,
-)
-
-
-
-
-# 数据库查询缓存层：2026-10-08 已拆出到 db_cache.py，
-# 下面保持符号再导出，调用点不用改。
+# 数据库查询缓存层：2026-10-08 已拆出到 db_cache.py
 from db_cache import (
-    _fetch_image_articles_cached,
-    _fetch_reviewed_cached,
-    _fetch_unreviewed_cached,
     _get_setting_cached,
     _init_db_cached,
     _invalidate_caches,
-    _invalidate_draft_cache,
     _invalidate_setting_cache,
-    _list_drafts_cached,
-    _list_excluded_cached,
-    _stats_overview_cached,
 )
 
 st.title("🧭 行者")
@@ -247,10 +188,6 @@ from tabs.tab_material import render_material
 
 with tab_material:
     render_material()
-
-
-    
-
 
 # ----- Tab 5: 撰稿中心（行者撰稿 + 成稿体检）-----
 # 2026-10-24 已拆出到 tabs/tab_writing.py
