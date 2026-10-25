@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 
 import requests
 
@@ -61,6 +59,24 @@ def _sys_prompt() -> str:
     )
 
 
+def _human_error(reason: str) -> str:
+    """把技术报错翻译成用户能看懂的人话（2026-10-25 新增）。
+
+    之前两路 AI 失败都被吞成一句「请求失败」，云端到底败在哪无从排查。
+    现在失败原因记日志 + 回传界面，这里负责挑常见情况说人话。
+    """
+    r = reason.lower()
+    if "timeout" in r or "timed out" in r:
+        return "请求超时（网络抖动），再点一次通常就好"
+    if "401" in reason or "403" in reason or "unauthorized" in r or "invalid api key" in r:
+        return "API Key 无效或已过期，需要检查配置"
+    if "429" in reason:
+        return "触发限流，等一两分钟再试"
+    if "connect" in r or "proxy" in r or "ssl" in r:
+        return "连不上 AI 服务商（网络问题）"
+    return reason[:120]
+
+
 def write_article(topic: str, angle: str = "", word_count: int = 800,
                   target_media: str = "中国石油报", facts: str = "") -> dict:
     """AI 生成新闻稿初稿：默认智谱 GLM，失败回退腾讯 deepseek。"""
@@ -71,7 +87,8 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
         user_msg += f"已知事实/数据：{facts}\n"
     user_msg += "\n请以 JSON 格式返回，字段为 title（标题）和 body（正文）。正文用纯文本，段落间用换行分隔。"
 
-    def _call(base: str, api_key: str, model: str) -> dict | None:
+    def _call(base: str, api_key: str, model: str) -> tuple[dict | None, str]:
+        """返回 (响应JSON, 失败原因)。失败原因记日志并回传，不再吞成 None。"""
         try:
             resp = requests.post(
                 base,
@@ -89,9 +106,11 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
                 timeout=60,
             )
             resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
+            return resp.json(), ""
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"[:300]
+            config.logger.warning(f"ai_writer.write/{model}: {reason}")
+            return None, reason
 
     def _parse(data: dict) -> dict:
         content = data["choices"][0]["message"]["content"]
@@ -102,23 +121,28 @@ def write_article(topic: str, angle: str = "", word_count: int = 800,
         return {"title": "", "body": content, "ok": True, "error": ""}
 
     # 1) 主力：智谱 GLM（免费）
+    first_err = ""
     zp_key = config.ZHIPU_API_KEY
     if zp_key:
-        data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
+        data, first_err = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
         if data:
             try:
                 return _parse(data)
-            except Exception:
-                pass
+            except Exception as e:
+                first_err = f"响应解析失败：{e}"
 
     # 2) 后备：腾讯云 deepseek（原方案）
     config.logger.info("ai_writer: 智谱调用失败或未配 Key，回退到腾讯云 deepseek")
     tc_key = config.TENCENTCLOUD_API_KEY
     if not tc_key:
-        return {"title": "", "body": "", "ok": False, "error": "智谱与腾讯云 Key 均未配置"}
-    data = _call(_TC_BASE, tc_key, _TC_MODEL)
+        return {"title": "", "body": "", "ok": False,
+                "error": f"智谱：{_human_error(first_err) if first_err else 'Key 未配置'}；腾讯云 Key 也未配置"}
+    data, tc_err = _call(_TC_BASE, tc_key, _TC_MODEL)
     if not data:
-        return {"title": "", "body": "", "ok": False, "error": "写稿请求失败"}
+        config.logger.warning(f"ai_writer.write: 两路都失败 智谱={first_err!r} 腾讯={tc_err!r}")
+        return {"title": "", "body": "", "ok": False,
+                "error": f"智谱——{_human_error(first_err) if first_err else 'Key 未配置'}；"
+                         f"腾讯云——{_human_error(tc_err)}"}
     try:
         return _parse(data)
     except Exception as e:
@@ -153,7 +177,8 @@ def revise_article(title: str, body: str, instruction: str) -> dict:
         f"4. 只返回 JSON，不要附加解释"
     )
 
-    def _call(base: str, api_key: str, model: str) -> dict | None:
+    def _call(base: str, api_key: str, model: str) -> tuple[dict | None, str]:
+        """返回 (响应JSON, 失败原因)。失败原因记日志并回传，不再吞成 None。"""
         try:
             resp = requests.post(
                 base,
@@ -171,9 +196,11 @@ def revise_article(title: str, body: str, instruction: str) -> dict:
                 timeout=90,
             )
             resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
+            return resp.json(), ""
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"[:300]
+            config.logger.warning(f"ai_writer.revise/{model}: {reason}")
+            return None, reason
 
     def _parse(data: dict) -> dict:
         content = data["choices"][0]["message"]["content"]
@@ -199,22 +226,27 @@ def revise_article(title: str, body: str, instruction: str) -> dict:
 
     # 1) 主力：腾讯云 DeepSeek-V4-Pro（指令跟随强，免费额度内）
     tc_key = config.TENCENTCLOUD_API_KEY
+    tc_err = ""
     if tc_key:
-        data = _call(_TC_BASE, tc_key, _TC_MODEL_PRO)
+        data, tc_err = _call(_TC_BASE, tc_key, _TC_MODEL_PRO)
         if data:
             try:
                 return _check(_parse(data))
-            except Exception:
-                pass
+            except Exception as e:
+                tc_err = f"响应解析失败：{e}"
 
     # 2) 后备：智谱 GLM-Flash
     config.logger.info("ai_writer.revise: 腾讯云调用失败，回退智谱 GLM")
     zp_key = config.ZHIPU_API_KEY
     if not zp_key:
-        return {"title": title, "body": body, "ok": False, "error": "腾讯云与智谱 Key 均未配置"}
-    data = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
+        return {"title": title, "body": body, "ok": False,
+                "error": f"腾讯云——{_human_error(tc_err) if tc_err else 'Key 未配置'}；智谱 Key 也未配置"}
+    data, zp_err = _call(_ZHIPU_BASE, zp_key, _ZHIPU_MODEL)
     if not data:
-        return {"title": title, "body": body, "ok": False, "error": "修改请求失败"}
+        config.logger.warning(f"ai_writer.revise: 两路都失败 腾讯={tc_err!r} 智谱={zp_err!r}")
+        return {"title": title, "body": body, "ok": False,
+                "error": f"腾讯云——{_human_error(tc_err) if tc_err else 'Key 未配置'}；"
+                         f"智谱——{_human_error(zp_err)}"}
     try:
         return _check(_parse(data))
     except Exception as e:
