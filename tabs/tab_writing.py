@@ -20,6 +20,11 @@ from db_cache import _invalidate_draft_cache, _list_drafts_cached
 from text_utils import _bj_time, _md_escape
 
 
+# 模块级标记：本轮脚本里编辑框是否已实例化（render_writing 每次重跑会重置）。
+# 有了它，任何地方调用 _set_draft_content 都不必操心自己站在编辑框前还是后。
+_EDITOR_LIVE = False
+
+
 def _set_draft_content(title: str, body: str) -> None:
     """统一入口：改写当前稿件内容时，必须连同"带 key 的输入框"一起更新。
 
@@ -27,9 +32,17 @@ def _set_draft_content(title: str, body: str) -> None:
     之后 `value=` 参数不再生效。只改 session_state 里的源变量（draft_title/body）
     没用——界面继续显示旧内容，下一轮还会把旧内容反向写回 session_state。
     典型症状：点开另一条草稿却还是上一篇、改过的名字被改回去。
+
+    2026-10-25 加固：新版 Streamlit 规定「控件实例化后不许再改它绑定的 state」，
+    否则抛 StreamlitWidgetAlreadyInstantiatedError（整页红屏）。
+    这里统一兜底——若本轮编辑框已经画出来了，就自动改走「暂存 → 下轮写入」，
+    调用方不用再关心调用位置，也不会踩雷。
     """
     st.session_state["draft_title"] = title
     st.session_state["draft_body"] = body
+    if _EDITOR_LIVE:
+        st.session_state["_pending_revise"] = (title, body)
+        st.rerun()  # 下轮开头（编辑框实例化前）消费，见 render_writing 里的接力处
     st.session_state["draft_title_in"] = title
     st.session_state["draft_body_in"] = body
 
@@ -44,6 +57,8 @@ def _draft_save_status(dirty: bool) -> str:
     return "尚未保存"
 
 def render_writing() -> None:
+    global _EDITOR_LIVE
+    _EDITOR_LIVE = False  # 每轮脚本重跑都从这里开始，编辑框还没画
     sub_writer, sub_check = st.tabs(["✍️ 行者撰稿", "📝 成稿体检"])
     with sub_writer:
         st.subheader("✍️ 行者撰稿")
@@ -244,6 +259,9 @@ def render_writing() -> None:
             st.session_state.setdefault("draft_body_in", st.session_state.get("draft_body", ""))
             cur_title = st.text_input("标题", key="draft_title_in")
             cur_body = st.text_area("正文", height=400, key="draft_body_in")
+            # 编辑框已画出：此后写 draft_*_in 会被新版 Streamlit 拒绝，
+            # _set_draft_content 会据此自动改走暂存 → rerun 的安全路径。
+            _EDITOR_LIVE = True
             # 同步编辑后的值回 session_state，供 AI 修改读取
             st.session_state["draft_title"] = cur_title
             st.session_state["draft_body"] = cur_body
