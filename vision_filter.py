@@ -158,10 +158,20 @@ def _image_to_thumb_b64(raw: bytes) -> str | None:
 
 
 def _fetch_image_bytes(url: str) -> bytes | None:
-    """下载原图字节（复用 image_archive 的下载，含 cnpc Referer 处理）。"""
+    """取原图字节。复用 image_loader 的完整取图链：内存缓存 → DB 归档 → 磁盘缓存 → 源站下载。
+
+    为什么不直接 requests.get：稿件里存的图 URL 常是源站缩略图/占位地址（如 cnpc 的
+    `..._thumb.jpg`，直接请求只回一个 JS 跳转页），真实图早已归档进 DB（生产渲染就是这么
+    取的）。直接下 URL 会拿到 93 字节跳转页、Pillow 打不开 → 视觉闸门拿不到图只能 fail-open。
+    复用 image_loader 则与生产渲染走同一条取图路，cnpc/防盗链/归档全部命中。
+    """
     try:
-        from image_archive import _download
-        return _download(url, timeout=20)
+        import image_loader
+        uri = image_loader._img_to_data_uri(url)
+        if not uri or "," not in uri:
+            return None
+        raw = base64.b64decode(uri.split(",", 1)[1])
+        return raw or None
     except Exception:
         return None
 
@@ -276,7 +286,7 @@ def _classify_one(url: str) -> str | None:
 
     verdict = _label_to_verdict(label)
     try:
-        db.save_vision_verdict(url=url, verdict=verdict, reason=label, model=config.VISION_MODEL)
+        db.save_vision_verdict(image_url=url, verdict=verdict, reason=label, model=config.VISION_MODEL)
     except Exception:
         pass  # 缓存写失败不影响本次判定
     return verdict
