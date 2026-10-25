@@ -229,6 +229,14 @@ def render_writing() -> None:
         if st.session_state.get("draft_body"):
             st.divider()
             st.markdown("#### 📄 当前稿件")
+            # AI 修改的两步接力（2026-10-25 修复 StreamlitWidgetAlreadyInstantiatedError）：
+            # 「AI 按要求修改」按钮在编辑框实例化【之后】才拿到 AI 结果，
+            # 那时直接写 draft_*_in 会被新版 Streamlit 拒绝（报错见截图）。
+            # 所以按钮分支只把结果暂存到 _pending_revise，统一在这里——
+            # 编辑框实例化之前——消费掉，此时调用 _set_draft_content 是合法的。
+            _pending_rev = st.session_state.pop("_pending_revise", None)
+            if _pending_rev:
+                _set_draft_content(_pending_rev[0], _pending_rev[1])
             # 这两个输入框只由 key 管值（见 _set_draft_content），不再同时传 value=，
             # 否则 Streamlit 每轮都会刷一条"Session State 与默认值冲突"的告警。
             # setdefault 是兜底：万一外部没同步 key，也能显示正确内容而不是空白。
@@ -316,7 +324,11 @@ def render_writing() -> None:
                         with st.spinner("AI 正在修改..."):
                             rr = ai_writer.revise_article(cur_title, cur_body, rev_instr)
                         if rr["ok"]:
-                            _set_draft_content(rr["title"], rr["body"])
+                            # 2026-10-25 修复：此处编辑框已实例化，直接改它绑定的
+                            # draft_title_in/draft_body_in 会报
+                            # StreamlitWidgetAlreadyInstantiatedError。
+                            # 改为暂存 → rerun → 编辑框实例化前消费（见上方接力处）。
+                            st.session_state["_pending_revise"] = (rr["title"], rr["body"])
                             # 关键：先落库、再给提示、最后只 rerun 一次，
                             # 这样提示不会因为中途重跑而被丢掉
                             if st.session_state.get("draft_autosave", True):
