@@ -12,8 +12,6 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -196,7 +194,19 @@ def is_relevant(title: str, summary: str = "", body_text: str = "") -> tuple[boo
             )
             if resp.status_code != 200:
                 return None
-            return resp.json()
+            # 强制按 UTF-8 解码：智谱/硅基响应头可能不带 charset，resp.json() 会按
+            # latin-1 解码 UTF-8，导致中文角度标签乱码（与 vision_filter 同坑，一并修）。
+            # 兼容两种形态：真实 requests.Response（content 是 bytes）→ 显式 UTF-8 解码；
+            # 单元测试 mock（只暴露 .json()）→ 退回 resp.json()。
+            content = getattr(resp, "content", None)
+            if isinstance(content, (bytes, bytearray)):
+                try:
+                    return json.loads(bytes(content).decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    return None
+            if hasattr(resp, "json"):
+                return resp.json()
+            return None
         except requests.RequestException:
             return None
 

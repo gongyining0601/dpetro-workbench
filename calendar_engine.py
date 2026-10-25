@@ -35,7 +35,6 @@ def upcoming_topics(today: date | None = None, horizon_days: int = 14) -> list[d
     触发逻辑：今天 + lead_days 落在选题时间窗内，或今天在时间窗内。
     """
     today = today or date.today()
-    horizon = today + timedelta(days=horizon_days)
     out: list[dict] = []
     with db.get_conn() as c:
         cur = db.conn_cursor(c)

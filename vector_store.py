@@ -82,7 +82,7 @@ class NumpyVectorStore:
         # 维度变化（换了嵌入模型）→ 清空重建（DELETE 可回滚，与 UPSERT 同事务）
         dim_changed = self.embs is not None and embs.shape[1] != self.embs.shape[1]
         if dim_changed:
-            config.logger.info(f"[vector_store] 向量维度变化，重建索引")
+            config.logger.info("[vector_store] 向量维度变化，重建索引")
 
         # 写 PG（清空 + UPSERT 在同一事务，失败可整体回滚）
         ts = now_iso()

@@ -9,7 +9,6 @@ import streamlit as st
 
 from db_cache import _invalidate_caches
 import calendar_engine
-import config
 import db
 
 def render_calendar() -> None:

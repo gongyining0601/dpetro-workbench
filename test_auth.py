@@ -1,6 +1,6 @@
 """auth 模块测试：密码哈希与校验往返。"""
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import auth
 

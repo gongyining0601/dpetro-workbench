@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """db 层跨境连接抖动自动重试的单元测试（用假数据库接口，不连真实 Supabase）。"""
-import time
 import unittest
 from unittest import mock
 

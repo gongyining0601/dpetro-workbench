@@ -1,0 +1,39 @@
+name: Test Gate
+
+# 实时质量门禁：每次 push / PR 到 master 时跑语法 + 单测 + 静态检查。
+# 背景（2026-10-25）：此前唯一的质量检查在 crawl.yml 里、只在每日定时/手动触发时跑，
+# 推送本身无门禁，改坏代码也能直接推到云端。这里补一个 push/PR 即时的门禁，
+# 任一环节失败则阻止合并/推送，防止 125 个单测之外出现隐性退化。
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyflakes
+
+      - name: Compile check (syntax)
+        run: python -m compileall -q .
+
+      - name: Unit tests (must all pass)
+        run: python -B -m unittest discover -p "test_*.py"
+
+      - name: Lint (pyflakes, must have no undefined name)
+        run: python -m pyflakes $(find . -name '*.py' -not -path './.venv/*')

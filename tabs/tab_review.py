@@ -19,7 +19,7 @@ from db_cache import (
     _invalidate_setting_cache,
 )
 from image_loader import _preload_images, _render_image
-from text_utils import _bj_time, _md_escape, _safe_anchor
+from text_utils import _md_escape, _safe_anchor
 
 def _do_review_batch(article_ids, decision):
     """批量审核：连接断开时自动重建池并重试一次。返回 (是否成功, 影响行数)。"""

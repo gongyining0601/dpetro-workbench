@@ -774,7 +774,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
 
     obj = parse_zgsyb_object(spa_html)
     if not obj:
-        config.logger.error(f"  [错误] 未能从 SPA 页提取 epaperObject，可能页面结构变了")
+        config.logger.error("  [错误] 未能从 SPA 页提取 epaperObject，可能页面结构变了")
         return stats
     cur_date_iso = obj.get("curDate") or cur_date_iso
 
@@ -829,9 +829,6 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
             body_html = a.get("content") or ""
             body_text = clean_html_text(body_html)
             author = (a.get("author") or "").strip() or None
-            pre = (a.get("preTitle") or "").strip()
-            sub = (a.get("subtitle") or "").strip()
-            summary = (pre + (" " + sub if sub else "")).strip() or body_text[:80]
             cid = a.get("contentid")
             # 文章 URL：构造锚点定位到当期 SPA 页（正文已在 body_text 里，URL 仅供审核台点开参考）
             art_url = f"http://epaper.cnpc.com.cn/zgsyb/{date_path}/#con_{cid}"
@@ -854,7 +851,6 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                     img_urls.extend(json.loads(body_img_urls))
                 except (json.JSONDecodeError, TypeError):
                     pass
-            has_image = bool(img_urls)
             image_urls = json.dumps(img_urls, ensure_ascii=False) if img_urls else None
             # 两道闸门：①是不是图片新闻 ②属不属于 5 类（被排除的自动登记留痕）
             cat, ai_pending = gate_article(
@@ -892,7 +888,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                                                fallback_fn=_crop_from_board)
         time.sleep(config.CRAWL_INTERVAL_SECONDS)
     if not matched_any and all_aliases:
-        config.logger.info(f"  [提示] 当期没有版面 alias 命中 config 栏目名。考虑在 config.py 加这些版面之一。")
+        config.logger.info("  [提示] 当期没有版面 alias 命中 config 栏目名。考虑在 config.py 加这些版面之一。")
     return stats
 
 

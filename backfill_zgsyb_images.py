@@ -17,7 +17,6 @@ import re
 
 from urllib.parse import urljoin
 
-import config
 import crawler
 import db
 import image_archive
