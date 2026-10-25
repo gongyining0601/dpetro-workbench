@@ -36,6 +36,7 @@ import config
 import db
 import image_archive
 import image_guard
+import vision_filter
 
 
 @dataclass
@@ -542,11 +543,25 @@ def _record_excluded(*, source: str, column: str, title: str, url: str,
         config.logger.debug(f"登记已排除稿件失败（忽略）：{e}")
 
 
+def _vision_check_for(source: str):
+    """返回一个视觉闸门回调（签名同 comic_check），来源未启用时返回 None。
+
+    视觉闸门是给通过三道文本闸门的图片稿再加的第四道：看图判断题材，
+    拦截领导会见/漫画/旅游等无关照片（文本看不出图，只能看图）。见 vision_filter。
+    """
+    try:
+        if not vision_filter.is_enabled_for(source):
+            return None
+        return vision_filter.make_vision_check()
+    except Exception:
+        return None
+
+
 def gate_article(*, source: str, column: str, title: str, url: str,
                  body_text: str, image_count: int, soup,
                  image_urls=None, publish_date=None,
-                 stats: dict, comic_check=None) -> tuple[str | None, bool]:
-    """三道闸门：①是不是图片新闻 ②属不属于 5 类题材 ③是不是漫画。
+                 stats: dict, comic_check=None, vision_check=None) -> tuple[str | None, bool]:
+    """四道闸门：①是不是图片新闻 ②属不属于 5 类题材 ③是不是漫画 ④是不是无关题材图。
 
     返回 (category, ai_pending)。category 为 None 表示被排除
     （已自动登记到已排除列表，并把计数写进 stats）。
@@ -554,6 +569,9 @@ def gate_article(*, source: str, column: str, title: str, url: str,
 
     comic_check：可选函数，参数是 image_urls（JSON 串），返回 (是否漫画, 依据)。
     只有 config.COMIC_CHECK_SOURCES 里的来源才传（如辽宁日报）。
+
+    vision_check：可选函数，参数是 image_urls（JSON 串），返回 (是否无关题材, 依据)。
+    用智谱免费视觉模型看图判题材（领导会见/漫画/旅游等拦截）。来源未启用时传 None。
     """
     ok, why = _photo_news_check(soup, body_text, image_count, title=title, url=url)
     if not ok:
@@ -605,6 +623,24 @@ def gate_article(*, source: str, column: str, title: str, url: str,
                 source=source, column=column, title=title, url=url,
                 reason_code="comic",
                 reason=f"疑似漫画/插画：{why}",
+                image_urls=image_urls, body_text=body_text,
+                publish_date=publish_date, image_count=image_count,
+            )
+            return None, False
+
+    # 第四道闸门：AI 视觉题材分类（看图判断，拦截领导会见/漫画/旅游等无关题材图）
+    # 只在来源启用视觉且传入 vision_check 时才跑；API 失败/未配 Key 一律放行（fail-open）。
+    if vision_check is not None:
+        try:
+            is_reject, why = vision_check(image_urls)
+        except Exception:
+            is_reject, why = False, ""
+        if is_reject:
+            stats["skipped_vision"] = stats.get("skipped_vision", 0) + 1
+            _record_excluded(
+                source=source, column=column, title=title, url=url,
+                reason_code="vision_reject",
+                reason=why,
                 image_urls=image_urls, body_text=body_text,
                 publish_date=publish_date, image_count=image_count,
             )
@@ -826,6 +862,7 @@ def crawl_zgsyb(src: dict, target_date: date | None = None) -> dict:
                 body_text=body_text, image_count=len(img_urls),
                 soup=BeautifulSoup(body_html, "html.parser"),
                 image_urls=image_urls, publish_date=publish_date, stats=stats,
+                vision_check=_vision_check_for(src["name"]),
             )
             if not cat:
                 continue
@@ -1034,6 +1071,7 @@ def crawl_lnd(src: dict, target_date: date | None = None) -> dict:
                 body_text=art.body_text, image_count=_lnd_img_count, soup=_lnd_soup,
                 image_urls=art.image_urls, publish_date=art.publish_date, stats=stats,
                 comic_check=_lnd_comic_check,
+                vision_check=_vision_check_for(src["name"]),
             )
             if not cat:
                 continue
@@ -1116,6 +1154,7 @@ def crawl_generic(src: dict, date_range: tuple[date, date] | None = None) -> dic
                 source=src["name"], column=col["name"], title=art.title, url=link.url,
                 body_text=art.body_text, image_count=_gen_img_count, soup=_gen_soup,
                 image_urls=art.image_urls, publish_date=art.publish_date, stats=stats,
+                vision_check=_vision_check_for(src["name"]),
             )
             if not cat:
                 continue
@@ -1295,6 +1334,7 @@ def crawl_rmrb(src: dict, target_date: date | None = None) -> dict:
                 source=src["name"], column=col["name"], title=art.title, url=link.url,
                 body_text=art.body_text, image_count=_rmrb_img_count, soup=_rmrb_soup,
                 image_urls=art.image_urls, publish_date=art.publish_date, stats=stats,
+                vision_check=_vision_check_for(src["name"]),
             )
             if not cat:
                 continue

@@ -160,6 +160,19 @@ CREATE TABLE IF NOT EXISTS excluded_article (
 );
 CREATE INDEX IF NOT EXISTS idx_excluded_crawled ON excluded_article(crawled_at DESC);
 
+-- 视觉题材判定缓存（2026-10-25 新增）
+-- 背景：用智谱免费视觉模型 glm-4v-flash 判一张新闻图片属于"保留类"还是"拒绝类"，
+-- 拦截领导会见/漫画/旅游等无关照片。结论按 image_url 缓存，同一张图第二次起不重复调用
+-- 视觉 API（省钱 + 提速）。verdict: accept / reject。
+CREATE TABLE IF NOT EXISTS vision_verdict (
+    id         BIGSERIAL PRIMARY KEY,
+    image_url  TEXT NOT NULL UNIQUE,
+    verdict    TEXT NOT NULL,   -- accept / reject
+    reason     TEXT,            -- 模型给出的类别名
+    model      TEXT,
+    created_at TEXT NOT NULL
+);
+
 -- 图片归档（2026-10-07 新增）
 -- 背景：中国石油报改版后源站把历史原图全下架了，旧链接全废、图再也找不回来。
 -- 对策：抓取当时就把图下下来、压缩后存这里，页面优先读归档，源站删图不受影响。
@@ -915,6 +928,39 @@ def get_image_asset(orig_url: str):
     except Exception as e:
         config.logger.warning(f"读取归档图片失败：{e}")
         return None
+
+
+@db_retry()
+def get_vision_verdict(image_url: str) -> str | None:
+    """读单张图的视觉题材判定结论。返回 'accept'/'reject'，未缓存返回 None。"""
+    if not image_url:
+        return None
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "SELECT verdict FROM vision_verdict WHERE image_url=%s", (image_url,)
+        )
+        r = cur.fetchone()
+        return r["verdict"] if r else None
+
+
+@db_retry()
+def save_vision_verdict(*, image_url: str, verdict: str, reason: str = "",
+                        model: str = "") -> bool:
+    """写入/更新单张图的视觉题材判定结论。URL 冲突则覆盖。"""
+    if not image_url or verdict not in ("accept", "reject"):
+        return False
+    with get_conn() as c:
+        cur = conn_cursor(c)
+        cur.execute(
+            "INSERT INTO vision_verdict(image_url, verdict, reason, model, created_at) "
+            "VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (image_url) DO UPDATE SET "
+            "verdict=EXCLUDED.verdict, reason=EXCLUDED.reason, "
+            "model=EXCLUDED.model, created_at=EXCLUDED.created_at",
+            (image_url, verdict, reason[:200], model[:100], now_iso()),
+        )
+        return cur.rowcount > 0
 
 
 @db_retry()

@@ -282,6 +282,23 @@ EXCLUSION_LOG_INCLUDE_NO_IMAGE = os.environ.get("EXCLUSION_LOG_INCLUDE_NO_IMAGE"
 # 识别被拦的稿件会进「已排除」列表（原因=疑似漫画），误杀可一键恢复。
 COMIC_CHECK_SOURCES = {"辽宁日报"}
 
+# ---------- AI 视觉图片分类（2026-10-25 新增） ----------
+# 背景：人民日报「视觉」/辽宁日报等图片版，领导会见、漫画、旅游等无关照片会混进
+# "石油化工相关"的图片稿。文本闸门（标题/图注关键词）看不出图，只能看图判断。
+# 方案 A：用智谱免费视觉模型 glm-4v-flash，对通过三道文本闸门的图片稿做题材二分类。
+# 判定按 URL 缓存进 DB（vision_verdict 表），同一张图第二次起不重复调用；免费档成本近零。
+VISION_FILTER_ENABLED = os.environ.get("VISION_FILTER_ENABLED", "1") == "1"
+# 对哪些来源启用视觉闸门（空集合 = 所有走 gate_article 的来源都启用）
+VISION_SOURCES = set()
+# 智谱免费视觉模型名（以智谱官方「免费模型」列表为准，变更改这里或环境变量）
+# ⚠️ 锁定免费模型，勿改成付费模型：本模块失败即放行、绝不静默切到其它模型，
+# 改付费模型会在账户有余额时产生费用且无提示。
+VISION_MODEL = os.environ.get("VISION_MODEL", "glm-4v-flash")
+# 每篇最多抽查前几张图（全部判拒绝才排除；任一保留/拿不准即保留整稿）
+VISION_MAX_IMAGES_PER_ARTICLE = 2
+# 连续失败熔断阈值：视觉 API 连续失败达此值后跳过调用（fail-open，不误杀）
+VISION_CIRCUIT_BREAKER = int(os.environ.get("VISION_CIRCUIT_BREAKER", "5"))
+
 # 媒体源与栏目配置
 # priority: P0=每日必扫；P1=有空就扫
 MEDIA_SOURCES = [
